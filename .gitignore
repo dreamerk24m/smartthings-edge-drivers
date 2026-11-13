@@ -1,0 +1,10 @@
+# macOS가 자동으로 만드는 파일
+.DS_Store
+
+# VS Code 개인 설정
+.vscode/
+
+# 비밀 정보 (토큰, 로컬 키 등)
+.env
+secrets/
+*.secret
