@@ -1,10 +1,44 @@
 name: yeelight-lightbar
 components:
   - id: main
+    label: 앞 조명
     capabilities:
       - id: switch
         version: 1
+      - id: switchLevel
+        version: 1
+      - id: colorTemperature
+        version: 1
+        config:
+          values:
+            - key: "colorTemperature.value"
+              range: [2700, 6500]
       - id: refresh
+        version: 1
+      - id: synthetic.lightingEffectFade
+        version: 1
+      - id: synthetic.lightingEffectCircadian
+        version: 1
+    categories:
+      - name: Light
+  - id: background
+    label: 뒤 조명
+    capabilities:
+      - id: switch
+        version: 1
+      - id: switchLevel
+        version: 1
+      - id: colorControl
+        version: 1
+      - id: colorTemperature
+        version: 1
+        config:
+          values:
+            - key: "colorTemperature.value"
+              range: [2700, 6500]
+      - id: synthetic.lightingEffectFade
+        version: 1
+      - id: synthetic.lightingEffectCircadian
         version: 1
     categories:
       - name: Light

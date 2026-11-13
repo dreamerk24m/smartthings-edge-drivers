@@ -1,4 +1,4 @@
--- Yeelight LAN 드라이버 (뼈대: 검색, 켜기/끄기, 새로고침)
+-- Yeelight LAN 드라이버 (Light Bar: 앞 조명 + 뒤 조명)
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local socket = require "cosock.socket"
@@ -14,11 +14,22 @@ local SUPPORTED_MODELS = {
   lamp15 = { profile = "yeelight-lightbar", label = "Yeelight Light Bar" },
 }
 
+-- 새로고침 때 읽어 올 값들
+local PROPS = { "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat" }
+
+-- 구성 요소별 명령 이름 (앞 조명 / 뒤 조명)
+local METHODS = {
+  main = { power = "set_power", bright = "set_bright", ct = "set_ct_abx" },
+  background = { power = "bg_set_power", bright = "bg_set_bright", ct = "bg_set_ct_abx" },
+}
+
+local CT_MIN, CT_MAX = 2700, 6500
+
 -- 검색 중에 찾은 기기의 IP를 잠깐 기억해 두는 곳 (기기 id → IP)
 local discovered_ips = {}
 
 -------------------------------------------------------------------
--- 1. 기기 검색 (SSDP: 네트워크에 "Yeelight 있어?"라고 묻기)
+-- 1. 기기 검색 (SSDP)
 -------------------------------------------------------------------
 local function parse_ssdp(data)
   local info = {}
@@ -43,7 +54,6 @@ local function discovery_handler(driver, _, should_continue)
     "", "",
   }, "\r\n")
 
-  -- 이미 만든 기기는 다시 만들지 않기
   local known = {}
   for _, device in ipairs(driver:get_devices()) do
     known[device.device_network_id] = true
@@ -55,7 +65,7 @@ local function discovery_handler(driver, _, should_continue)
     udp:sendto(request, SSDP_ADDR, SSDP_PORT)
     while true do
       local data, sender_ip = udp:receivefrom()
-      if not data then break end -- 2초 동안 응답이 없으면 다음 시도
+      if not data then break end
       local info = parse_ssdp(data)
       local model = info["model"]
       local ip = (info["location"] or ""):match("yeelight://([%d%.]+):") or sender_ip
@@ -86,7 +96,47 @@ local function discovery_handler(driver, _, should_continue)
 end
 
 -------------------------------------------------------------------
--- 2. 명령 보내기 (TCP로 JSON 한 줄 보내고 답 받기)
+-- 2. 상태 반영 (기기 값 → 스마트싱스 화면)
+-------------------------------------------------------------------
+local function emit(device, comp_id, event)
+  local comp = device.profile.components[comp_id]
+  if comp then device:emit_component_event(comp, event) end
+end
+
+local function switch_event(value)
+  if value == "on" then return capabilities.switch.switch.on() end
+  return capabilities.switch.switch.off()
+end
+
+-- 기기가 알려 준 값(props, get_prop 결과)을 화면에 반영
+local function apply_props(device, props)
+  for key, value in pairs(props) do
+    if value ~= nil and value ~= "" then
+      local num = tonumber(value)
+      if key == "main_power" then
+        emit(device, "main", switch_event(value))
+      elseif key == "bright" and num then
+        emit(device, "main", capabilities.switchLevel.level(num))
+      elseif key == "ct" and num then
+        emit(device, "main", capabilities.colorTemperature.colorTemperature(num))
+      elseif key == "bg_power" then
+        emit(device, "background", switch_event(value))
+      elseif key == "bg_bright" and num then
+        emit(device, "background", capabilities.switchLevel.level(num))
+      elseif key == "bg_ct" and num then
+        emit(device, "background", capabilities.colorTemperature.colorTemperature(num))
+      elseif key == "bg_hue" and num then
+        -- Yeelight 0~359 → 스마트싱스 0~100
+        emit(device, "background", capabilities.colorControl.hue(math.floor(num / 359 * 100 + 0.5)))
+      elseif key == "bg_sat" and num then
+        emit(device, "background", capabilities.colorControl.saturation(num))
+      end
+    end
+  end
+end
+
+-------------------------------------------------------------------
+-- 3. 명령 보내기 (TCP로 JSON 한 줄 보내고 답 받기)
 -------------------------------------------------------------------
 local function send_command(device, method, params)
   local ip = device:get_field("ip")
@@ -110,7 +160,6 @@ local function send_command(device, method, params)
   log.debug("[yeelight] 보냄: " .. payload)
   tcp:send(payload .. "\r\n")
 
-  -- 기기가 상태 알림(props)을 먼저 보낼 수도 있어서, 내 id의 답을 찾을 때까지 몇 줄 읽기
   local result
   for _ = 1, 5 do
     local line, rerr = tcp:receive("*l")
@@ -120,9 +169,16 @@ local function send_command(device, method, params)
     end
     log.debug("[yeelight] 받음: " .. line)
     local decoded = json.decode(line)
-    if decoded and decoded.id == msg_id then
-      result = decoded
-      break
+    if decoded then
+      if decoded.method == "props" and decoded.params then
+        apply_props(device, decoded.params) -- 기기가 먼저 알려 준 변경 사항 반영
+      elseif decoded.id == msg_id then
+        result = decoded
+        if decoded.error then
+          log.warn("[yeelight] 오류: " .. tostring(decoded.error.message))
+        end
+        break
+      end
     end
   end
   tcp:close()
@@ -131,27 +187,77 @@ local function send_command(device, method, params)
 end
 
 -------------------------------------------------------------------
--- 3. 상태 읽기와 버튼 동작
+-- 4. 새로고침과 버튼 동작
 -------------------------------------------------------------------
 local function refresh(device)
-  local res = send_command(device, "get_prop", { "power" })
+  local res = send_command(device, "get_prop", PROPS)
   if res and res.result then
-    if res.result[1] == "on" then
-      device:emit_event(capabilities.switch.switch.on())
-    else
-      device:emit_event(capabilities.switch.switch.off())
-    end
+    local props = {}
+    for i, name in ipairs(PROPS) do props[name] = res.result[i] end
+    apply_props(device, props)
   end
 end
 
-local function handle_on(_, device)
-  local res = send_command(device, "set_power", { "on", "smooth", 500 })
-  if res and res.result then device:emit_event(capabilities.switch.switch.on()) end
+local function clamp(v, lo, hi)
+  return math.max(lo, math.min(hi, v))
 end
 
-local function handle_off(_, device)
-  local res = send_command(device, "set_power", { "off", "smooth", 500 })
-  if res and res.result then device:emit_event(capabilities.switch.switch.off()) end
+local function is_on(device, comp_id)
+  return device:get_latest_state(comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
+end
+
+local function power(device, comp_id, on)
+  local value = on and "on" or "off"
+  local res = send_command(device, METHODS[comp_id].power, { value, "smooth", 500 })
+  if res and res.result then emit(device, comp_id, switch_event(value)) end
+end
+
+local function handle_on(_, device, command)
+  power(device, command.component, true)
+end
+
+local function handle_off(_, device, command)
+  power(device, command.component, false)
+end
+
+local function handle_set_level(_, device, command)
+  local comp_id = command.component
+  local level = clamp(math.floor(command.args.level), 0, 100)
+  if level == 0 then return power(device, comp_id, false) end
+  if not is_on(device, comp_id) then power(device, comp_id, true) end
+  send_command(device, METHODS[comp_id].bright, { level, "smooth", 300 })
+end
+
+local function handle_set_ct(_, device, command)
+  local comp_id = command.component
+  local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
+  if not is_on(device, comp_id) then power(device, comp_id, true) end
+  send_command(device, METHODS[comp_id].ct, { ct, "smooth", 300 })
+end
+
+local function set_bg_color(device, hue_pct, sat)
+  -- 스마트싱스 0~100 → Yeelight 0~359
+  local hue = clamp(math.floor(hue_pct / 100 * 359 + 0.5), 0, 359)
+  sat = clamp(math.floor(sat), 0, 100)
+  if not is_on(device, "background") then power(device, "background", true) end
+  send_command(device, "bg_set_hsv", { hue, sat, "smooth", 300 })
+end
+
+local function current_bg(device, attr)
+  return device:get_latest_state("background", capabilities.colorControl.ID, attr) or 0
+end
+
+local function handle_set_color(_, device, command)
+  local c = command.args.color
+  set_bg_color(device, c.hue or current_bg(device, "hue"), c.saturation or current_bg(device, "saturation"))
+end
+
+local function handle_set_hue(_, device, command)
+  set_bg_color(device, command.args.hue, current_bg(device, "saturation"))
+end
+
+local function handle_set_saturation(_, device, command)
+  set_bg_color(device, current_bg(device, "hue"), command.args.saturation)
 end
 
 local function handle_refresh(_, device)
@@ -159,7 +265,7 @@ local function handle_refresh(_, device)
 end
 
 -------------------------------------------------------------------
--- 4. 기기가 생기거나 허브가 재시작될 때
+-- 5. 기기가 생기거나 허브가 재시작될 때
 -------------------------------------------------------------------
 local function ensure_ip(device)
   if not device:get_field("ip") then
@@ -172,7 +278,6 @@ local function device_init(_, device)
   log.info("[yeelight] 기기 준비: " .. device.label)
   ensure_ip(device)
   refresh(device)
-  -- 앱이나 리모컨으로 바꾼 상태를 따라가려고 60초마다 확인
   device.thread:call_on_schedule(60, function() refresh(device) end, "yeelight-poll")
 end
 
@@ -191,6 +296,17 @@ local driver = Driver("yeelight-lan", {
     [capabilities.switch.ID] = {
       [capabilities.switch.commands.on.NAME] = handle_on,
       [capabilities.switch.commands.off.NAME] = handle_off,
+    },
+    [capabilities.switchLevel.ID] = {
+      [capabilities.switchLevel.commands.setLevel.NAME] = handle_set_level,
+    },
+    [capabilities.colorTemperature.ID] = {
+      [capabilities.colorTemperature.commands.setColorTemperature.NAME] = handle_set_ct,
+    },
+    [capabilities.colorControl.ID] = {
+      [capabilities.colorControl.commands.setColor.NAME] = handle_set_color,
+      [capabilities.colorControl.commands.setHue.NAME] = handle_set_hue,
+      [capabilities.colorControl.commands.setSaturation.NAME] = handle_set_saturation,
     },
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = handle_refresh,

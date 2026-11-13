@@ -1,7 +1,7 @@
-name: 'Yeelight LAN'
-packageKey: 'dreamer-yeelight-lan'
-description: 'Local LAN control for Yeelight ceiling lights and screen bars'
-vendorSupportInformation: 'https://github.com/dreamerk24m'
+name: "Yeelight LAN"
+packageKey: "dreamer-yeelight-lan"
+description: "Local LAN control for Yeelight ceiling lights and screen bars"
+vendorSupportInformation: "https://github.com/dreamerk24m/smartthings-lan-edge-drivers"
 permissions:
   lan: {}
   discovery: {}
