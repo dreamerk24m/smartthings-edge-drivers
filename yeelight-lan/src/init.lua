@@ -277,6 +277,11 @@ end
 local function device_init(_, device)
   log.info("[yeelight] 기기 준비: " .. device.label)
   ensure_ip(device)
+  -- 조명이 낼 수 있는 범위 알려 주기 (하루 조명·페이드 효과가 사용)
+  for _, comp_id in ipairs({ "main", "background" }) do
+    emit(device, comp_id, capabilities.switchLevel.levelRange({ value = { minimum = 1, maximum = 100 } }))
+    emit(device, comp_id, capabilities.colorTemperature.colorTemperatureRange({ value = { minimum = CT_MIN, maximum = CT_MAX } }))
+  end
   refresh(device)
   device.thread:call_on_schedule(60, function() refresh(device) end, "yeelight-poll")
 end
