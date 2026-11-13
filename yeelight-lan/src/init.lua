@@ -23,6 +23,9 @@ local METHODS = {
   background = { power = "bg_set_power", bright = "bg_set_bright", ct = "bg_set_ct_abx" },
 }
 
+-- 구성 요소별 전원 상태 이름
+local POWER_PROP = { main = "main_power", background = "bg_power" }
+
 local CT_MIN, CT_MAX = 2700, 6500
 
 -- 검색 중에 찾은 기기의 IP를 잠깐 기억해 두는 곳 (기기 id → IP)
@@ -109,9 +112,9 @@ local function switch_event(value)
 end
 
 -- 기기가 알려 준 값(props, get_prop 결과)을 화면에 반영
-local function apply_props(device, props)
+local function apply_props(device, props, ignore)
   for key, value in pairs(props) do
-    if value ~= nil and value ~= "" then
+    if value ~= nil and value ~= "" and not (ignore and ignore[key]) then
       local num = tonumber(value)
       if key == "main_power" then
         emit(device, "main", switch_event(value))
@@ -138,7 +141,7 @@ end
 -------------------------------------------------------------------
 -- 3. 명령 보내기 (TCP로 JSON 한 줄 보내고 답 받기)
 -------------------------------------------------------------------
-local function send_command(device, method, params)
+local function send_command(device, method, params, ignore)
   local ip = device:get_field("ip")
   if not ip then
     log.warn("[yeelight] IP를 모름: " .. device.label)
@@ -171,7 +174,7 @@ local function send_command(device, method, params)
     local decoded = json.decode(line)
     if decoded then
       if decoded.method == "props" and decoded.params then
-        apply_props(device, decoded.params) -- 기기가 먼저 알려 준 변경 사항 반영
+        apply_props(device, decoded.params, ignore) -- 기기가 먼저 알려 준 변경 사항 반영
       elseif decoded.id == msg_id then
         result = decoded
         if decoded.error then
@@ -208,8 +211,16 @@ end
 
 local function power(device, comp_id, on)
   local value = on and "on" or "off"
-  local res = send_command(device, METHODS[comp_id].power, { value, "smooth", 500 })
-  if res and res.result then emit(device, comp_id, switch_event(value)) end
+  local res = send_command(device, METHODS[comp_id].power, { value, "smooth", 500 }, { [POWER_PROP[comp_id]] = true })
+  if res and res.result then
+    emit(device, comp_id, switch_event(value))
+    -- 꺼져 있는 동안 기억해 둔 색온도·색상이 있으면 켜면서 적용
+    local pending = device:get_field("pending_" .. comp_id)
+    if on and pending then
+      device:set_field("pending_" .. comp_id, nil)
+      send_command(device, pending.method, pending.params)
+    end
+  end
 end
 
 local function handle_on(_, device, command)
@@ -231,7 +242,12 @@ end
 local function handle_set_ct(_, device, command)
   local comp_id = command.component
   local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
-  if not is_on(device, comp_id) then power(device, comp_id, true) end
+  if not is_on(device, comp_id) then
+    -- 꺼져 있으면 켜지 않고 값만 기억 (다음에 켤 때 적용)
+    device:set_field("pending_" .. comp_id, { method = METHODS[comp_id].ct, params = { ct, "sudden", 0 } })
+    emit(device, comp_id, capabilities.colorTemperature.colorTemperature(ct))
+    return
+  end
   send_command(device, METHODS[comp_id].ct, { ct, "smooth", 300 })
 end
 
@@ -239,7 +255,13 @@ local function set_bg_color(device, hue_pct, sat)
   -- 스마트싱스 0~100 → Yeelight 0~359
   local hue = clamp(math.floor(hue_pct / 100 * 359 + 0.5), 0, 359)
   sat = clamp(math.floor(sat), 0, 100)
-  if not is_on(device, "background") then power(device, "background", true) end
+  if not is_on(device, "background") then
+    -- 꺼져 있으면 켜지 않고 값만 기억 (다음에 켤 때 적용)
+    device:set_field("pending_background", { method = "bg_set_hsv", params = { hue, sat, "sudden", 0 } })
+    emit(device, "background", capabilities.colorControl.hue(math.floor(hue / 359 * 100 + 0.5)))
+    emit(device, "background", capabilities.colorControl.saturation(sat))
+    return
+  end
   send_command(device, "bg_set_hsv", { hue, sat, "smooth", 300 })
 end
 
