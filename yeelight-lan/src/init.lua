@@ -15,7 +15,7 @@ local SUPPORTED_MODELS = {
 }
 
 -- 새로고침 때 읽어 올 값들
-local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat", "bg_lmode" }
+local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat", "bg_lmode", "bg_proact" }
 
 -- 구성 요소별 명령 이름 (앞 조명 / 뒤 조명)
 local METHODS = {
@@ -170,6 +170,8 @@ local function apply_props(device, props)
         emit(device, "background", capabilities.colorControl.saturation(num))
       elseif key == "bg_lmode" and num then
         device:set_field("bg_lmode", num) -- 뒤 조명 모드 (2 = 색온도, 3 = 색)
+      elseif key == "bg_proact" and num then
+        device:set_field("bg_proact", num) -- 기기의 앞뒤 연동 설정 (1 = 연동, Yeelight 앱에서만 바꿀 수 있음)
       end
     end
   end
@@ -391,12 +393,7 @@ local function scene_params(device, comp_id, level)
   return { "ct", current_ct(device, comp_id), level }
 end
 
--- set_scene으로 켜기 (저장해 둔 값은 여기서 사용하고 지움)
-local function turn_on_with_scene(device, comp_id, level)
-  local params = scene_params(device, comp_id, level)
-  device:set_field("pending_" .. comp_id, nil)
-  send_command(device, METHODS[comp_id].scene, params)
-end
+local turn_on_with_scene -- 아래에서 정의 (power와 서로 부르기 때문에 이름만 먼저 선언)
 
 -- 화면의 켜짐/꺼짐은 기기가 보내는 props 알림으로 바뀜
 local function power(device, comp_id, on)
@@ -405,6 +402,18 @@ local function power(device, comp_id, on)
     return turn_on_with_scene(device, comp_id)
   end
   send_command(device, METHODS[comp_id].power, { on and "on" or "off", "smooth", 500 })
+end
+
+-- set_scene으로 켜기 (저장해 둔 값은 여기서 사용하고 지움)
+function turn_on_with_scene(device, comp_id, level)
+  local params = scene_params(device, comp_id, level)
+  device:set_field("pending_" .. comp_id, nil)
+  send_command(device, METHODS[comp_id].scene, params)
+  -- 기기의 앞뒤 연동은 set_power에만 적용되고 set_scene에는 적용되지 않음
+  -- 그래서 연동이 켜져 있으면 앞 조명을 set_scene으로 켤 때 뒤 조명도 직접 켜 줌
+  if comp_id == "main" and device:get_field("bg_proact") == 1 and not is_on(device, "background") then
+    power(device, "background", true)
+  end
 end
 
 local function handle_on(_, device, command)
