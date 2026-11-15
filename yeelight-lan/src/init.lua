@@ -15,12 +15,12 @@ local SUPPORTED_MODELS = {
 }
 
 -- 새로고침 때 읽어 올 값들
-local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat" }
+local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat", "bg_lmode" }
 
 -- 구성 요소별 명령 이름 (앞 조명 / 뒤 조명)
 local METHODS = {
-  main = { power = "set_power", bright = "set_bright", ct = "set_ct_abx" },
-  background = { power = "bg_set_power", bright = "bg_set_bright", ct = "bg_set_ct_abx" },
+  main = { power = "set_power", bright = "set_bright", ct = "set_ct_abx", scene = "set_scene" },
+  background = { power = "bg_set_power", bright = "bg_set_bright", ct = "bg_set_ct_abx", scene = "bg_set_scene" },
 }
 
 -- 구성 요소별 전원 상태 이름
@@ -168,6 +168,8 @@ local function apply_props(device, props)
         emit(device, "background", capabilities.colorControl.hue(math.floor(num / 359 * 100 + 0.5)))
       elseif key == "bg_sat" and num then
         emit(device, "background", capabilities.colorControl.saturation(num))
+      elseif key == "bg_lmode" and num then
+        device:set_field("bg_lmode", num) -- 뒤 조명 모드 (2 = 색온도, 3 = 색)
       end
     end
   end
@@ -358,17 +360,51 @@ local function is_on(device, comp_id)
   return device:get_latest_state(comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
 end
 
+local function current_level(device, comp_id)
+  local level = device:get_latest_state(comp_id, capabilities.switchLevel.ID, capabilities.switchLevel.level.NAME)
+  return clamp(math.floor(tonumber(level) or 100), 1, 100)
+end
+
+local function current_ct(device, comp_id)
+  local ct = device:get_latest_state(comp_id, capabilities.colorTemperature.ID, capabilities.colorTemperature.colorTemperature.NAME)
+  return clamp(math.floor(tonumber(ct) or CT_MAX), CT_MIN, CT_MAX)
+end
+
+local function to_yeelight_hue(hue_pct)
+  return clamp(math.floor(hue_pct / 100 * 359 + 0.5), 0, 359) -- 스마트싱스 0~100 → Yeelight 0~359
+end
+
+-- 켜면서 색과 밝기를 한 번에 정하는 set_scene 값 만들기
+-- 꺼져 있는 동안 저장해 둔 값이 있으면 그 값, 없으면 지금 모드와 값 그대로
+local function scene_params(device, comp_id, level)
+  level = level or current_level(device, comp_id)
+  local pending = device:get_field("pending_" .. comp_id)
+  if pending and pending.kind == "hsv" then
+    return { "hsv", pending.hue, pending.sat, level }
+  elseif pending and pending.kind == "ct" then
+    return { "ct", pending.ct, level }
+  elseif comp_id == "background" and device:get_field("bg_lmode") == 3 then
+    local hue = device:get_latest_state("background", capabilities.colorControl.ID, "hue") or 0
+    local sat = device:get_latest_state("background", capabilities.colorControl.ID, "saturation") or 100
+    return { "hsv", to_yeelight_hue(hue), clamp(math.floor(sat), 0, 100), level }
+  end
+  return { "ct", current_ct(device, comp_id), level }
+end
+
+-- set_scene으로 켜기 (저장해 둔 값은 여기서 사용하고 지움)
+local function turn_on_with_scene(device, comp_id, level)
+  local params = scene_params(device, comp_id, level)
+  device:set_field("pending_" .. comp_id, nil)
+  send_command(device, METHODS[comp_id].scene, params)
+end
+
 -- 화면의 켜짐/꺼짐은 기기가 보내는 props 알림으로 바뀜
 local function power(device, comp_id, on)
-  local value = on and "on" or "off"
-  send_command(device, METHODS[comp_id].power, { value, "smooth", 500 }, function()
-    -- 꺼져 있는 동안 기억해 둔 색온도·색상이 있으면 켜진 뒤에 적용
-    local pending = device:get_field("pending_" .. comp_id)
-    if on and pending then
-      device:set_field("pending_" .. comp_id, nil)
-      send_command(device, pending.method, pending.params)
-    end
-  end)
+  if on and device:get_field("pending_" .. comp_id) then
+    -- 꺼져 있는 동안 색온도나 색을 바꿨으면 그 값으로 바로 켜기 (예전 색이 잠깐 보이지 않게)
+    return turn_on_with_scene(device, comp_id)
+  end
+  send_command(device, METHODS[comp_id].power, { on and "on" or "off", "smooth", 500 })
 end
 
 local function handle_on(_, device, command)
@@ -383,7 +419,10 @@ local function handle_set_level(_, device, command)
   local comp_id = command.component
   local level = clamp(math.floor(command.args.level), 0, 100)
   if level == 0 then return power(device, comp_id, false) end
-  if not is_on(device, comp_id) then power(device, comp_id, true) end
+  if not is_on(device, comp_id) then
+    -- 꺼져 있으면 그 밝기로 바로 켜기 (Matter의 MoveToLevelWithOnOff와 같은 동작)
+    return turn_on_with_scene(device, comp_id, level)
+  end
   send_command(device, METHODS[comp_id].bright, { level, "smooth", 300 })
 end
 
@@ -391,9 +430,9 @@ local function handle_set_ct(_, device, command)
   local comp_id = command.component
   local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
   if not is_on(device, comp_id) then
-    -- 꺼져 있으면 켜지 않고 값만 기억 (다음에 켤 때 적용)
+    -- 꺼져 있으면 켜지 않고 값만 저장 (Matter 표준 ExecuteIfOff와 같은 동작. 켤 때 set_scene으로 적용)
     -- 기기로 보내는 게 없어서 알림이 오지 않으므로 화면은 직접 바꿈
-    device:set_field("pending_" .. comp_id, { method = METHODS[comp_id].ct, params = { ct, "sudden", 0 } })
+    device:set_field("pending_" .. comp_id, { kind = "ct", ct = ct })
     emit(device, comp_id, capabilities.colorTemperature.colorTemperature(ct))
     return
   end
@@ -401,12 +440,11 @@ local function handle_set_ct(_, device, command)
 end
 
 local function set_bg_color(device, hue_pct, sat)
-  -- 스마트싱스 0~100 → Yeelight 0~359
-  local hue = clamp(math.floor(hue_pct / 100 * 359 + 0.5), 0, 359)
+  local hue = to_yeelight_hue(hue_pct)
   sat = clamp(math.floor(sat), 0, 100)
   if not is_on(device, "background") then
-    -- 꺼져 있으면 켜지 않고 값만 기억 (다음에 켤 때 적용)
-    device:set_field("pending_background", { method = "bg_set_hsv", params = { hue, sat, "sudden", 0 } })
+    -- 꺼져 있으면 켜지 않고 값만 저장 (켤 때 bg_set_scene으로 적용)
+    device:set_field("pending_background", { kind = "hsv", hue = hue, sat = sat })
     emit(device, "background", capabilities.colorControl.hue(math.floor(hue / 359 * 100 + 0.5)))
     emit(device, "background", capabilities.colorControl.saturation(sat))
     return
