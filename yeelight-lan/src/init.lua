@@ -15,7 +15,7 @@ local SUPPORTED_MODELS = {
 }
 
 -- 새로고침 때 읽어 올 값들
-local PROPS = { "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat" }
+local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat" }
 
 -- 구성 요소별 명령 이름 (앞 조명 / 뒤 조명)
 local METHODS = {
@@ -111,13 +111,14 @@ local function switch_event(value)
   return capabilities.switch.switch.off()
 end
 
--- 기기가 알려 준 값(props, get_prop 결과)을 화면에 반영
-local function apply_props(device, props, ignore)
+-- 기기가 알려 준 값(props 알림, get_prop 결과)을 화면에 반영
+-- 화면 상태는 이 함수로만 바뀜 (명령을 보낸 쪽에서는 직접 바꾸지 않음)
+local function apply_props(device, props)
   for key, value in pairs(props) do
-    if value ~= nil and value ~= "" and not (ignore and ignore[key]) then
+    if value ~= nil and value ~= "" then
       local num = tonumber(value)
-      if key == "main_power" then
-        emit(device, "main", switch_event(value))
+      if key == "main_power" or key == "power" then
+        device:set_field(key, value) -- 앞 조명 켜짐/꺼짐은 반복문이 끝난 뒤에 한 번에 계산
       elseif key == "bright" and num then
         emit(device, "main", capabilities.switchLevel.level(num))
       elseif key == "ct" and num then
@@ -136,69 +137,132 @@ local function apply_props(device, props, ignore)
       end
     end
   end
+  -- 앞 조명: 전체 전원(power)과 앞 조명 전원(main_power)이 둘 다 on일 때만 켜짐
+  -- (끌 때 기기가 main_power를 "on"으로 잘못 보내서 power도 같이 봐야 함)
+  if props.power or props.main_power then
+    local main_on = device:get_field("power") == "on" and device:get_field("main_power") == "on"
+    emit(device, "main", switch_event(main_on and "on" or "off"))
+  end
 end
 
 -------------------------------------------------------------------
--- 3. 명령 보내기 (TCP로 JSON 한 줄 보내고 답 받기)
+-- 3. 연결 유지 (기기마다 TCP 연결 하나를 열어 두고 계속 사용)
 -------------------------------------------------------------------
-local function send_command(device, method, params, ignore)
+local driver -- 아래에서 만든 드라이버 (연결 등록에 필요)
+local next_id = 0
+
+-- 기기에서 받은 한 줄 처리
+local function handle_line(device, line)
+  local ok, decoded = pcall(json.decode, line)
+  if not ok or type(decoded) ~= "table" then
+    log.warn("[yeelight] 알 수 없는 응답: " .. line)
+    return
+  end
+
+  if decoded.method == "props" and decoded.params then
+    -- 기기가 먼저 알려 준 변경 사항 (스마트싱스, 리모컨, Yeelight 앱 등 모두 여기로 들어옴)
+    log.info("[yeelight] 알림: " .. line)
+    apply_props(device, decoded.params)
+    return
+  end
+
+  if decoded.id then
+    -- 보낸 명령에 대한 응답
+    local requests = device:get_field("requests") or {}
+    local req = requests[decoded.id]
+    requests[decoded.id] = nil
+    if decoded.error then
+      log.warn(string.format("[yeelight] 오류 (%s): %s",
+        req and req.method or "?", tostring(decoded.error.message)))
+    else
+      log.debug("[yeelight] 응답: " .. line)
+      if req and req.on_result then req.on_result(decoded.result) end
+    end
+  end
+end
+
+local function close_conn(device, reason)
+  local sock = device:get_field("sock")
+  if sock then
+    log.warn("[yeelight] 연결 끊김: " .. tostring(reason))
+    driver:unregister_channel_handler(sock)
+    sock:close()
+    device:set_field("sock", nil)
+  end
+  device:set_field("requests", {})
+end
+
+-- 연결이 없으면 새로 열고, 기기가 보내는 줄을 받을 수 있게 등록
+local function get_conn(device)
+  local sock = device:get_field("sock")
+  if sock then return sock end
+
   local ip = device:get_field("ip")
   if not ip then
     log.warn("[yeelight] IP를 모름: " .. device.label)
     return nil
   end
 
-  local tcp = socket.tcp()
-  tcp:settimeout(3)
-  local ok, err = tcp:connect(ip, YEELIGHT_PORT)
+  sock = socket.tcp()
+  sock:settimeout(3)
+  local ok, err = sock:connect(ip, YEELIGHT_PORT)
   if not ok then
     log.error("[yeelight] 연결 실패 " .. ip .. ": " .. tostring(err))
-    tcp:close()
+    sock:close()
     device:offline()
     return nil
   end
+  pcall(sock.setoption, sock, "keepalive", true)
 
-  local msg_id = math.random(1, 100000)
-  local payload = json.encode({ id = msg_id, method = method, params = params })
-  log.debug("[yeelight] 보냄: " .. payload)
-  tcp:send(payload .. "\r\n")
+  device:set_field("sock", sock)
+  device:set_field("requests", {})
+  driver:register_channel_handler(sock, function(_, s)
+    local line, rerr = s:receive("*l")
+    if line then
+      handle_line(device, line)
+    elseif rerr ~= "timeout" then
+      close_conn(device, rerr)
+    end
+  end, "yeelight-" .. device.device_network_id)
 
-  local result
-  for _ = 1, 5 do
-    local line, rerr = tcp:receive("*l")
-    if not line then
-      log.warn("[yeelight] 응답 없음: " .. tostring(rerr))
-      break
-    end
-    log.debug("[yeelight] 받음: " .. line)
-    local decoded = json.decode(line)
-    if decoded then
-      if decoded.method == "props" and decoded.params then
-        apply_props(device, decoded.params, ignore) -- 기기가 먼저 알려 준 변경 사항 반영
-      elseif decoded.id == msg_id then
-        result = decoded
-        if decoded.error then
-          log.warn("[yeelight] 오류: " .. tostring(decoded.error.message))
-        end
-        break
-      end
-    end
-  end
-  tcp:close()
+  log.info("[yeelight] 연결됨: " .. ip)
   device:online()
-  return result
+  return sock
+end
+
+-- 명령 보내기 (답을 기다리지 않음. 답이 오면 on_result가 불림)
+local function send_command(device, method, params, on_result)
+  for attempt = 1, 2 do
+    local sock = get_conn(device)
+    if not sock then return false end
+
+    next_id = next_id % 100000 + 1
+    local requests = device:get_field("requests") or {}
+    requests[next_id] = { method = method, on_result = on_result }
+    device:set_field("requests", requests)
+
+    local payload = json.encode({ id = next_id, method = method, params = params })
+    log.debug("[yeelight] 보냄: " .. payload)
+    local ok, err = sock:send(payload .. "\r\n")
+    if ok then return true end
+
+    -- 열어 둔 연결이 이미 끊겨 있었으면 한 번만 새로 연결해서 다시 보냄
+    requests[next_id] = nil
+    close_conn(device, err)
+    if attempt == 2 then return false end
+  end
 end
 
 -------------------------------------------------------------------
 -- 4. 새로고침과 버튼 동작
 -------------------------------------------------------------------
 local function refresh(device)
-  local res = send_command(device, "get_prop", PROPS)
-  if res and res.result then
+  send_command(device, "get_prop", PROPS, function(result)
+    if type(result) ~= "table" then return end
     local props = {}
-    for i, name in ipairs(PROPS) do props[name] = res.result[i] end
+    for i, name in ipairs(PROPS) do props[name] = result[i] end
     apply_props(device, props)
-  end
+  end)
 end
 
 local function clamp(v, lo, hi)
@@ -209,18 +273,17 @@ local function is_on(device, comp_id)
   return device:get_latest_state(comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
 end
 
+-- 화면의 켜짐/꺼짐은 기기가 보내는 props 알림으로 바뀜
 local function power(device, comp_id, on)
   local value = on and "on" or "off"
-  local res = send_command(device, METHODS[comp_id].power, { value, "smooth", 500 }, { [POWER_PROP[comp_id]] = true })
-  if res and res.result then
-    emit(device, comp_id, switch_event(value))
-    -- 꺼져 있는 동안 기억해 둔 색온도·색상이 있으면 켜면서 적용
+  send_command(device, METHODS[comp_id].power, { value, "smooth", 500 }, function()
+    -- 꺼져 있는 동안 기억해 둔 색온도·색상이 있으면 켜진 뒤에 적용
     local pending = device:get_field("pending_" .. comp_id)
     if on and pending then
       device:set_field("pending_" .. comp_id, nil)
       send_command(device, pending.method, pending.params)
     end
-  end
+  end)
 end
 
 local function handle_on(_, device, command)
@@ -244,6 +307,7 @@ local function handle_set_ct(_, device, command)
   local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
   if not is_on(device, comp_id) then
     -- 꺼져 있으면 켜지 않고 값만 기억 (다음에 켤 때 적용)
+    -- 기기로 보내는 게 없어서 알림이 오지 않으므로 화면은 직접 바꿈
     device:set_field("pending_" .. comp_id, { method = METHODS[comp_id].ct, params = { ct, "sudden", 0 } })
     emit(device, comp_id, capabilities.colorTemperature.colorTemperature(ct))
     return
@@ -313,11 +377,16 @@ local function device_added(_, device)
   refresh(device)
 end
 
-local driver = Driver("yeelight-lan", {
+local function device_removed(_, device)
+  close_conn(device, "기기 삭제")
+end
+
+driver = Driver("yeelight-lan", {
   discovery = discovery_handler,
   lifecycle_handlers = {
     init = device_init,
     added = device_added,
+    removed = device_removed,
   },
   capability_handlers = {
     [capabilities.switch.ID] = {
