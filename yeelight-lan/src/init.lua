@@ -28,6 +28,12 @@ local POWER_PROP = { main = "main_power", background = "bg_power" }
 
 local CT_MIN, CT_MAX = 2700, 6500
 
+local POLL_INTERVAL = 300    -- 확인용 폴링 간격 (초)
+local POLL_TIMEOUT = 5       -- 폴링 응답을 기다리는 시간 (초). 넘으면 연결이 조용히 끊긴 것으로 봄
+local RETRY_FIRST = 30       -- 다시 연결에 실패했을 때 첫 대기 시간 (초)
+local RETRY_MAX = 60         -- 대기 시간 최대 (초). 실패할 때마다 두 배로 늘어남
+local REDISCOVER_EVERY = 3   -- 연결이 이 횟수만큼 연달아 실패하면 IP가 바뀌었는지 검색
+
 -- 검색 중에 찾은 기기의 IP를 잠깐 기억해 두는 곳 (기기 id → IP)
 local discovered_ips = {}
 
@@ -43,19 +49,24 @@ local function parse_ssdp(data)
   return info
 end
 
+local SSDP_REQUEST = table.concat({
+  "M-SEARCH * HTTP/1.1",
+  "HOST: 239.255.255.250:1982",
+  'MAN: "ssdp:discover"',
+  "ST: wifi_bulb",
+  "", "",
+}, "\r\n")
+
+local function ssdp_ip(info, sender_ip)
+  return (info["location"] or ""):match("yeelight://([%d%.]+):") or sender_ip
+end
+
 local function discovery_handler(driver, _, should_continue)
   log.info("[yeelight] 검색 시작")
   local udp = socket.udp()
   udp:setsockname("*", 0)
   udp:settimeout(2)
-
-  local request = table.concat({
-    "M-SEARCH * HTTP/1.1",
-    "HOST: 239.255.255.250:1982",
-    'MAN: "ssdp:discover"',
-    "ST: wifi_bulb",
-    "", "",
-  }, "\r\n")
+  local request = SSDP_REQUEST
 
   local known = {}
   for _, device in ipairs(driver:get_devices()) do
@@ -71,7 +82,7 @@ local function discovery_handler(driver, _, should_continue)
       if not data then break end
       local info = parse_ssdp(data)
       local model = info["model"]
-      local ip = (info["location"] or ""):match("yeelight://([%d%.]+):") or sender_ip
+      local ip = ssdp_ip(info, sender_ip)
       log.info(string.format("[yeelight] 응답: id=%s model=%s ip=%s",
         tostring(info["id"]), tostring(model), tostring(ip)))
 
@@ -96,6 +107,29 @@ local function discovery_handler(driver, _, should_continue)
   end
   udp:close()
   log.info("[yeelight] 검색 끝")
+end
+
+-- 이미 추가된 기기의 현재 IP를 검색으로 다시 찾기 (공유기가 IP를 바꿨을 때)
+local function find_ip(device)
+  local udp = socket.udp()
+  udp:setsockname("*", 0)
+  udp:settimeout(1)
+  local found
+  for _ = 1, 3 do
+    udp:sendto(SSDP_REQUEST, SSDP_ADDR, SSDP_PORT)
+    while true do
+      local data, sender_ip = udp:receivefrom()
+      if not data then break end
+      local info = parse_ssdp(data)
+      if info["id"] and "yl-" .. info["id"] == device.device_network_id then
+        found = ssdp_ip(info, sender_ip)
+        break
+      end
+    end
+    if found then break end
+  end
+  udp:close()
+  return found
 end
 
 -------------------------------------------------------------------
@@ -150,6 +184,7 @@ end
 -------------------------------------------------------------------
 local driver -- 아래에서 만든 드라이버 (연결 등록에 필요)
 local next_id = 0
+local get_conn, refresh -- 아래에서 정의 (서로 부르기 때문에 미리 이름만 선언)
 
 -- 기기에서 받은 한 줄 처리
 local function handle_line(device, line)
@@ -192,8 +227,27 @@ local function close_conn(device, reason)
   device:set_field("requests", {})
 end
 
+-- delay초 뒤에 다시 연결 시도 (이미 예약돼 있으면 그대로 둠)
+-- delay를 주지 않으면 실패할 때마다 30초 → 60초 → 120초 … 최대 5분으로 늘림
+local function schedule_reconnect(device, delay)
+  if device:get_field("removed") or device:get_field("reconnect_timer") then return end
+  if delay then
+    device:set_field("retry_delay", RETRY_FIRST)
+  else
+    delay = device:get_field("retry_delay") or RETRY_FIRST
+    device:set_field("retry_delay", math.min(delay * 2, RETRY_MAX))
+  end
+  log.info(string.format("[yeelight] %d초 뒤 다시 연결", delay))
+  local timer = device.thread:call_with_delay(delay, function()
+    device:set_field("reconnect_timer", nil)
+    if device:get_field("sock") then return end -- 그 사이 명령으로 이미 연결됨
+    if get_conn(device) then refresh(device) end -- 끊긴 동안 바뀐 상태 맞추기
+  end)
+  device:set_field("reconnect_timer", timer)
+end
+
 -- 연결이 없으면 새로 열고, 기기가 보내는 줄을 받을 수 있게 등록
-local function get_conn(device)
+function get_conn(device)
   local sock = device:get_field("sock")
   if sock then return sock end
 
@@ -210,6 +264,21 @@ local function get_conn(device)
     log.error("[yeelight] 연결 실패 " .. ip .. ": " .. tostring(err))
     sock:close()
     device:offline()
+
+    -- 여러 번 연달아 실패하면 IP가 바뀌었는지 검색
+    local fails = (device:get_field("fail_count") or 0) + 1
+    device:set_field("fail_count", fails)
+    if fails % REDISCOVER_EVERY == 0 then
+      local new_ip = find_ip(device)
+      if new_ip and new_ip ~= ip then
+        log.info(string.format("[yeelight] IP 바뀜: %s → %s", ip, new_ip))
+        device:set_field("ip", new_ip, { persist = true })
+        schedule_reconnect(device, 1)
+        return nil
+      end
+      log.info("[yeelight] 검색으로도 못 찾음 (IP 그대로: " .. ip .. ")")
+    end
+    schedule_reconnect(device)
     return nil
   end
   pcall(sock.setoption, sock, "keepalive", true)
@@ -222,10 +291,13 @@ local function get_conn(device)
       handle_line(device, line)
     elseif rerr ~= "timeout" then
       close_conn(device, rerr)
+      schedule_reconnect(device, 5) -- 기기가 연결을 끊으면 5초 뒤 바로 다시 연결
     end
   end, "yeelight-" .. device.device_network_id)
 
   log.info("[yeelight] 연결됨: " .. ip)
+  device:set_field("retry_delay", nil)
+  device:set_field("fail_count", 0)
   device:online()
   return sock
 end
@@ -256,12 +328,25 @@ end
 -------------------------------------------------------------------
 -- 4. 새로고침과 버튼 동작
 -------------------------------------------------------------------
-local function refresh(device)
-  send_command(device, "get_prop", PROPS, function(result)
+function refresh(device, on_answer)
+  return send_command(device, "get_prop", PROPS, function(result)
+    if on_answer then on_answer() end
     if type(result) ~= "table" then return end
     local props = {}
     for i, name in ipairs(PROPS) do props[name] = result[i] end
     apply_props(device, props)
+  end)
+end
+
+-- 확인용 폴링: 상태를 맞추고, 응답이 없으면 연결이 조용히 끊긴 것으로 보고 다시 연결
+local function poll(device)
+  local answered = false
+  if not refresh(device, function() answered = true end) then return end
+  device.thread:call_with_delay(POLL_TIMEOUT, function()
+    if not answered and device:get_field("sock") then
+      close_conn(device, "폴링 응답 없음")
+      schedule_reconnect(device, 1)
+    end
   end)
 end
 
@@ -347,7 +432,7 @@ local function handle_set_saturation(_, device, command)
 end
 
 local function handle_refresh(_, device)
-  refresh(device)
+  poll(device) -- 새로고침도 응답이 없으면 다시 연결
 end
 
 -------------------------------------------------------------------
@@ -369,7 +454,7 @@ local function device_init(_, device)
     emit(device, comp_id, capabilities.colorTemperature.colorTemperatureRange({ value = { minimum = CT_MIN, maximum = CT_MAX } }))
   end
   refresh(device)
-  device.thread:call_on_schedule(60, function() refresh(device) end, "yeelight-poll")
+  device.thread:call_on_schedule(POLL_INTERVAL, function() poll(device) end, "yeelight-poll")
 end
 
 local function device_added(_, device)
@@ -378,6 +463,9 @@ local function device_added(_, device)
 end
 
 local function device_removed(_, device)
+  device:set_field("removed", true) -- 다시 연결하지 않도록 표시
+  local timer = device:get_field("reconnect_timer")
+  if timer then device.thread:cancel_timer(timer) end
   close_conn(device, "기기 삭제")
 end
 
