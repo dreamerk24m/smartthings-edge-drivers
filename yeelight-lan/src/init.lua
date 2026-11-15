@@ -188,7 +188,7 @@ end
 -------------------------------------------------------------------
 local driver -- 아래에서 만든 드라이버 (연결 등록에 필요)
 local next_id = 0
-local get_conn, refresh -- 아래에서 정의 (서로 부르기 때문에 미리 이름만 선언)
+local get_conn, refresh, verify_main -- 아래에서 정의 (서로 부르기 때문에 미리 이름만 선언)
 
 -- 기기에서 받은 한 줄 처리
 local function handle_line(device, line)
@@ -201,7 +201,14 @@ local function handle_line(device, line)
   if decoded.method == "props" and decoded.params then
     -- 기기가 먼저 알려 준 변경 사항 (스마트싱스, 리모컨, Yeelight 앱 등 모두 여기로 들어옴)
     log.info("[yeelight] 알림: " .. line)
-    apply_props(device, decoded.params)
+    local params = decoded.params
+    if params.main_power ~= nil then
+      -- 알림의 main_power는 믿을 수 없음 (뒤 조명이 켜져 있으면 앞 조명을 꺼도 "on"으로 옴)
+      -- 그래서 이 값은 쓰지 않고 잠시 뒤 get_prop으로 다시 읽어서 반영 (get_prop 값은 정확함)
+      params.main_power = nil
+      verify_main(device)
+    end
+    apply_props(device, params)
     return
   end
 
@@ -327,6 +334,20 @@ local function send_command(device, method, params, on_result)
     close_conn(device, err)
     if attempt == 2 then return false end
   end
+end
+
+-- 앞 조명 켜짐/꺼짐을 get_prop으로 다시 확인 (0.5초 안에 여러 번 불려도 한 번만 확인)
+function verify_main(device)
+  if device:get_field("verify_timer") then return end
+  local timer = device.thread:call_with_delay(0.5, function()
+    device:set_field("verify_timer", nil)
+    send_command(device, "get_prop", { "power", "main_power" }, function(result)
+      if type(result) == "table" then
+        apply_props(device, { power = result[1], main_power = result[2] })
+      end
+    end)
+  end)
+  device:set_field("verify_timer", timer)
 end
 
 -------------------------------------------------------------------
