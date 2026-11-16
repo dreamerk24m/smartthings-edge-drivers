@@ -11,11 +11,13 @@ Local SmartThings Edge drivers, no manufacturer cloud needed. · [한국어](#�
 | `lamp15` | Light Bar     | Front Light + Back Light                                |
 | `ceilb`  | Ceiling light | Main Light + Moonlight, Background as a separate device |
 
-- <ins>Turn on **LAN Control** in the Yeelight app first.</ins>
+> [!IMPORTANT]
+> Turn on **LAN Control** in the Yeelight app first.
+
 - Instant updates from the remote and the Yeelight app; reconnects and finds a new IP by itself.
 - Circadian Lighting and Fade supported.
-- Like Matter lights: changing color while off saves it for the next turn-on; changing brightness turns the light on.
-- Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not break moonlight.
+- Like Matter lights: changing color while off only saves it and does not turn the light on; changing brightness turns it on.
+- Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not set off the moonlight.
 - Front/back link can only be changed in the Yeelight app.
 - Color temperature: 2700–6500 K (ceiling Background: 1700–6500 K).
 
