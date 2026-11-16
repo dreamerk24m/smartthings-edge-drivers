@@ -1,7 +1,7 @@
 name: yeelight-lightbar
 components:
   - id: main
-    label: 앞 조명
+    label: Front Light
     capabilities:
       - id: switch
         version: 1
@@ -22,7 +22,7 @@ components:
     categories:
       - name: Light
   - id: background
-    label: 뒤 조명
+    label: Back Light
     capabilities:
       - id: switch
         version: 1
