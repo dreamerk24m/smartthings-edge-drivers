@@ -1,9 +1,9 @@
 -- Yeelight LAN driver
 --   Light Bar (lamp15): front light + back light
---   Ceiling light (ceilb): main light + moonlight
+--   Ceiling light (ceilb): main light + moonlight, background light as a child device
 -- Yeelight LAN 드라이버
 --   Light Bar (lamp15): 앞 조명 + 뒤 조명
---   천장등 (ceilb): 본등 + 달빛
+--   천장등 (ceilb): 본등 + 달빛, 배경등은 자식 기기
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local socket = require "cosock.socket"
@@ -44,6 +44,24 @@ local POWER_PROP = { main = "main_power", background = "bg_power" }
 
 local CT_MIN, CT_MAX = 2700, 6500
 
+-- Color temperature ranges that differ from the default (checked on each device)
+-- 기본값과 다른 색온도 범위 (기기마다 직접 확인한 값)
+local CT_RANGES = {
+  ceilb = { background = { 1700, 6500 } }, -- RGB background light / RGB 배경등
+}
+
+-- Models without bg_set_scene (checked with the SSDP "support" list)
+-- bg_set_scene이 없는 모델 (검색 응답의 "support" 목록으로 확인)
+local NO_BG_SET_SCENE = { ceilb = true }
+
+-- Components shown as separate child devices
+-- 별도 자식 기기로 보여 줄 구성 요소
+local CHILDREN = {
+  ceilb = {
+    { key = "background", profile = "yeelight-ceiling-bg", label = "Yeelight Ceiling Light Background" },
+  },
+}
+
 local POLL_INTERVAL = 300    -- Health-check poll interval (s) / 확인용 폴링 간격 (초)
 local POLL_TIMEOUT = 5       -- No answer within this time means a dead connection (s) / 이 시간 안에 응답이 없으면 연결이 조용히 끊긴 것으로 봄 (초)
 local RETRY_FIRST = 30       -- First wait after a failed reconnect (s) / 다시 연결에 실패했을 때 첫 대기 시간 (초)
@@ -53,6 +71,8 @@ local REDISCOVER_EVERY = 3   -- After this many failures in a row, search for a 
 -- IPs found during discovery, kept briefly (device id → IP)
 -- 검색 중에 찾은 기기의 IP를 잠깐 기억해 두는 곳 (기기 id → IP)
 local discovered_ips = {}
+
+local driver -- Created at the bottom / 맨 아래에서 만듦
 
 -------------------------------------------------------------------
 -- 1. Discovery (SSDP)
@@ -87,7 +107,9 @@ local function discovery_handler(driver, _, should_continue)
 
   local known = {}
   for _, device in ipairs(driver:get_devices()) do
-    known[device.device_network_id] = true
+    -- Child devices have no network id
+    -- 자식 기기는 네트워크 id가 없음
+    if device.device_network_id then known[device.device_network_id] = true end
   end
 
   local tries = 0
@@ -154,11 +176,54 @@ end
 -- 2. Applying state (device values → SmartThings)
 --    상태 반영 (기기 값 → 스마트싱스 화면)
 -------------------------------------------------------------------
--- Emit only if this device's profile has the component (e.g. moonlight exists only on the ceiling light)
--- 이 기기의 프로필에 그 구성 요소가 있을 때만 반영 (예: 달빛은 천장등에만 있음)
+-- Where a component's state lives: a component of this device, or a child device
+-- (the ceiling background light). Returns nil if this device has no such component.
+-- 구성 요소의 상태가 있는 곳: 이 기기의 구성 요소, 또는 자식 기기(천장등 배경등)
+-- 이 기기에 그런 구성 요소가 없으면 nil
+local function state_target(device, comp_id)
+  if device.profile.components[comp_id] then return device, comp_id end
+  for _, d in ipairs(driver:get_devices()) do
+    if d.parent_device_id == device.id and d.parent_assigned_child_key == comp_id then
+      return d, "main"
+    end
+  end
+  return nil
+end
+
+-- Emit to wherever the component lives (skipped if the device does not have it,
+-- e.g. moonlight exists only on the ceiling light)
+-- 구성 요소가 있는 곳에 반영 (없으면 건너뜀. 예: 달빛은 천장등에만 있음)
 local function emit(device, comp_id, event)
-  local comp = device.profile.components[comp_id]
-  if comp then device:emit_component_event(comp, event) end
+  local target, comp = state_target(device, comp_id)
+  if target then target:emit_component_event(target.profile.components[comp], event) end
+end
+
+-- Latest state of a component (from wherever it lives)
+-- 구성 요소의 마지막 상태 (있는 곳에서 읽음)
+local function latest(device, comp_id, cap_id, attr)
+  local target, comp = state_target(device, comp_id)
+  if target then return target:get_latest_state(comp, cap_id, attr) end
+end
+
+local function model_of(device)
+  return device.model or device:get_field("model")
+end
+
+local function ct_range(device, comp_id)
+  local r = CT_RANGES[model_of(device)]
+  r = r and r[comp_id]
+  if r then return r[1], r[2] end
+  return CT_MIN, CT_MAX
+end
+
+-- Mark the device and its child devices online/offline
+-- 기기와 자식 기기를 같이 온라인/오프라인으로 표시
+local function set_online(device, online)
+  for _, d in ipairs(driver:get_devices()) do
+    if d.id == device.id or d.parent_device_id == device.id then
+      if online then d:online() else d:offline() end
+    end
+  end
 end
 
 local function has_moonlight(device)
@@ -236,7 +301,6 @@ end
 -- 3. Persistent connection (one TCP connection per device, kept open)
 --    연결 유지 (기기마다 TCP 연결 하나를 열어 두고 계속 사용)
 -------------------------------------------------------------------
-local driver -- Created below; needed to register channel handlers / 아래에서 만든 드라이버 (연결 등록에 필요)
 local next_id = 0
 -- Defined below (declared first because they call each other)
 -- 아래에서 정의 (서로 부르기 때문에 미리 이름만 선언)
@@ -338,7 +402,7 @@ function get_conn(device)
   if not ok then
     log.error("[yeelight] connect failed " .. ip .. ": " .. tostring(err))
     sock:close()
-    device:offline()
+    set_online(device, false)
 
     -- After several failures in a row, check whether the IP changed
     -- 여러 번 연달아 실패하면 IP가 바뀌었는지 검색
@@ -376,7 +440,7 @@ function get_conn(device)
   log.info("[yeelight] connected: " .. ip)
   device:set_field("retry_delay", nil)
   device:set_field("fail_count", 0)
-  device:online()
+  set_online(device, true)
   return sock
 end
 
@@ -452,17 +516,18 @@ local function clamp(v, lo, hi)
 end
 
 local function is_on(device, comp_id)
-  return device:get_latest_state(comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
+  return latest(device, comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
 end
 
 local function current_level(device, comp_id)
-  local level = device:get_latest_state(comp_id, capabilities.switchLevel.ID, capabilities.switchLevel.level.NAME)
+  local level = latest(device, comp_id, capabilities.switchLevel.ID, capabilities.switchLevel.level.NAME)
   return clamp(math.floor(tonumber(level) or 100), 1, 100)
 end
 
 local function current_ct(device, comp_id)
-  local ct = device:get_latest_state(comp_id, capabilities.colorTemperature.ID, capabilities.colorTemperature.colorTemperature.NAME)
-  return clamp(math.floor(tonumber(ct) or CT_MAX), CT_MIN, CT_MAX)
+  local ct = latest(device, comp_id, capabilities.colorTemperature.ID, capabilities.colorTemperature.colorTemperature.NAME)
+  local lo, hi = ct_range(device, comp_id)
+  return clamp(math.floor(tonumber(ct) or hi), lo, hi)
 end
 
 -- SmartThings 0–100 → Yeelight 0–359
@@ -482,9 +547,11 @@ local function scene_params(device, comp_id, level)
     return { "hsv", pending.hue, pending.sat, level }
   elseif pending and pending.kind == "ct" then
     return { "ct", pending.ct, level }
-  elseif comp_id == "background" and device:get_field("bg_lmode") == 3 then
-    local hue = device:get_latest_state("background", capabilities.colorControl.ID, "hue") or 0
-    local sat = device:get_latest_state("background", capabilities.colorControl.ID, "saturation") or 100
+  elseif comp_id == "background" and (device:get_field("bg_lmode") == 3 or device:get_field("bg_lmode") == 1) then
+    -- Color mode (3 = HSV, 1 = RGB): keep the current color
+    -- 색 모드 (3 = HSV, 1 = RGB): 지금 색 그대로
+    local hue = latest(device, "background", capabilities.colorControl.ID, "hue") or 0
+    local sat = latest(device, "background", capabilities.colorControl.ID, "saturation") or 100
     return { "hsv", to_yeelight_hue(hue), clamp(math.floor(sat), 0, 100), level }
   end
   return { "ct", current_ct(device, comp_id), level }
@@ -520,12 +587,28 @@ end
 function turn_on_with_scene(device, comp_id, level)
   local params = scene_params(device, comp_id, level)
   device:set_field("pending_" .. comp_id, nil)
-  send_command(device, METHODS[comp_id].scene, params)
+  if comp_id == "background" and NO_BG_SET_SCENE[model_of(device)] then
+    -- No bg_set_scene: turn on in the right mode (1 = color temperature, 3 = HSV), then set the values.
+    -- The values are sent "sudden" so they apply while the light is still fading in.
+    -- bg_set_scene이 없음: 맞는 모드(1 = 색온도, 3 = HSV)로 켜고 바로 값을 보냄
+    -- 켜지면서 서서히 밝아지는 동안 적용되도록 값은 "sudden"으로 보냄
+    if params[1] == "hsv" then
+      send_command(device, "bg_set_power", { "on", "smooth", 500, 3 })
+      send_command(device, "bg_set_hsv", { params[2], params[3], "sudden", 0 })
+      send_command(device, "bg_set_bright", { params[4], "sudden", 0 })
+    else
+      send_command(device, "bg_set_power", { "on", "smooth", 500, 1 })
+      send_command(device, "bg_set_ct_abx", { params[2], "sudden", 0 })
+      send_command(device, "bg_set_bright", { params[3], "sudden", 0 })
+    end
+  else
+    send_command(device, METHODS[comp_id].scene, params)
+  end
   -- The device's front/back link applies to set_power only, not set_scene,
   -- so when linked, turn the back light on ourselves
   -- 기기의 앞뒤 연동은 set_power에만 적용되고 set_scene에는 적용되지 않음
   -- 그래서 연동이 켜져 있으면 앞 조명을 set_scene으로 켤 때 뒤 조명도 직접 켜 줌
-  if comp_id == "main" and device.profile.components["background"]
+  if comp_id == "main" and state_target(device, "background")
     and device:get_field("bg_proact") == 1 and not is_on(device, "background") then
     power(device, "background", true)
   end
@@ -549,18 +632,32 @@ local function moonlight_off(device)
   power(device, "main", true)
 end
 
+-- A command on a child device is handled by the parent, as that component
+-- 자식 기기로 온 명령은 부모 기기가 그 구성 요소로 처리
+local function resolve(device, command)
+  if device.parent_assigned_child_key then
+    return device:get_parent_device(), device.parent_assigned_child_key
+  end
+  return device, command.component
+end
+
 local function handle_on(_, device, command)
-  if command.component == "moonlight" then return moonlight_on(device) end
-  power(device, command.component, true)
+  local comp_id
+  device, comp_id = resolve(device, command)
+  if comp_id == "moonlight" then return moonlight_on(device) end
+  power(device, comp_id, true)
 end
 
 local function handle_off(_, device, command)
-  if command.component == "moonlight" then return moonlight_off(device) end
-  power(device, command.component, false)
+  local comp_id
+  device, comp_id = resolve(device, command)
+  if comp_id == "moonlight" then return moonlight_off(device) end
+  power(device, comp_id, false)
 end
 
 local function handle_set_level(_, device, command)
-  local comp_id = command.component
+  local comp_id
+  device, comp_id = resolve(device, command)
   local level = clamp(math.floor(command.args.level), 0, 100)
   if comp_id == "moonlight" then
     -- Moonlight brightness: 0 turns the light off; otherwise turn on moonlight at this level
@@ -583,8 +680,10 @@ local function handle_set_level(_, device, command)
 end
 
 local function handle_set_ct(_, device, command)
-  local comp_id = command.component
-  local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
+  local comp_id
+  device, comp_id = resolve(device, command)
+  local lo, hi = ct_range(device, comp_id)
+  local ct = clamp(math.floor(command.args.temperature), lo, hi)
   if not is_on(device, comp_id) or (comp_id == "main" and in_moonlight(device)) then
     -- Off or in moonlight (e.g. Circadian Lighting): save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
     -- Nothing is sent, so no notification comes back; update the UI directly.
@@ -612,23 +711,27 @@ local function set_bg_color(device, hue_pct, sat)
 end
 
 local function current_bg(device, attr)
-  return device:get_latest_state("background", capabilities.colorControl.ID, attr) or 0
+  return latest(device, "background", capabilities.colorControl.ID, attr) or 0
 end
 
 local function handle_set_color(_, device, command)
+  device = resolve(device, command)
   local c = command.args.color
   set_bg_color(device, c.hue or current_bg(device, "hue"), c.saturation or current_bg(device, "saturation"))
 end
 
 local function handle_set_hue(_, device, command)
+  device = resolve(device, command)
   set_bg_color(device, command.args.hue, current_bg(device, "saturation"))
 end
 
 local function handle_set_saturation(_, device, command)
+  device = resolve(device, command)
   set_bg_color(device, current_bg(device, "hue"), command.args.saturation)
 end
 
-local function handle_refresh(_, device)
+local function handle_refresh(_, device, command)
+  device = resolve(device, command)
   -- Refresh also reconnects if there is no answer
   -- 새로고침도 응답이 없으면 다시 연결
   poll(device)
@@ -645,26 +748,74 @@ local function ensure_ip(device)
   end
 end
 
-local function device_init(_, device)
-  log.info("[yeelight] init: " .. device.label)
-  ensure_ip(device)
-  -- Report the supported ranges (used by Circadian Lighting and Fade)
-  -- 조명이 낼 수 있는 범위 알려 주기 (하루 조명·페이드 효과가 사용)
+-- Report the supported ranges (used by Circadian Lighting and Fade)
+-- 조명이 낼 수 있는 범위 알려 주기 (하루 조명·페이드 효과가 사용)
+local function emit_ranges(device)
   for _, comp_id in ipairs({ "main", "background" }) do
+    local lo, hi = ct_range(device, comp_id)
     emit(device, comp_id, capabilities.switchLevel.levelRange({ value = { minimum = 1, maximum = 100 } }))
-    emit(device, comp_id, capabilities.colorTemperature.colorTemperatureRange({ value = { minimum = CT_MIN, maximum = CT_MAX } }))
+    emit(device, comp_id, capabilities.colorTemperature.colorTemperatureRange({ value = { minimum = lo, maximum = hi } }))
   end
   emit(device, "moonlight", capabilities.switchLevel.levelRange({ value = { minimum = 1, maximum = 100 } }))
+end
+
+-- Create child devices this model needs (e.g. the ceiling background light) if missing
+-- 이 모델에 필요한 자식 기기가 없으면 만들기 (예: 천장등 배경등)
+local function ensure_children(device)
+  for _, child in ipairs(CHILDREN[model_of(device)] or {}) do
+    if not state_target(device, child.key) then
+      log.info("[yeelight] creating child device: " .. child.label)
+      driver:try_create_device({
+        type = "EDGE_CHILD",
+        label = child.label,
+        profile = child.profile,
+        parent_device_id = device.id,
+        parent_assigned_child_key = child.key,
+        vendor_provided_label = child.label,
+      })
+    end
+  end
+end
+
+local function device_init(_, device)
+  log.info("[yeelight] init: " .. device.label)
+  if device.parent_assigned_child_key then
+    -- Child device: everything goes through the parent; just report ranges.
+    -- No refresh here: the parent reads the state in its own init. If both started a connection
+    -- at the same time (e.g. after a driver update), two connections would be opened.
+    -- 자식 기기: 모든 통신은 부모가 함. 범위만 알림
+    -- 여기서는 상태를 읽지 않음: 부모가 자기 init에서 읽음. 둘이 동시에 연결을 열면
+    -- (예: 드라이버 업데이트 직후) 연결이 두 개 생김
+    local parent = device:get_parent_device()
+    if parent then emit_ranges(parent) end
+    return
+  end
+  ensure_ip(device)
+  if device.model then device:set_field("model", device.model, { persist = true }) end
+  emit_ranges(device)
+  ensure_children(device)
   refresh(device)
   device.thread:call_on_schedule(POLL_INTERVAL, function() poll(device) end, "yeelight-poll")
 end
 
 local function device_added(_, device)
+  if device.parent_assigned_child_key then
+    -- A new child device: fill its state once, on the parent's thread so connections never overlap
+    -- 새 자식 기기: 상태를 한 번 채움. 연결이 겹치지 않도록 부모 기기 쪽에서 실행
+    local parent = device:get_parent_device()
+    if parent then
+      parent.thread:call_with_delay(1, function() refresh(parent) end)
+    end
+    return
+  end
   ensure_ip(device)
   refresh(device)
 end
 
 local function device_removed(_, device)
+  -- Removing a child device must not close the parent's connection
+  -- 자식 기기를 지울 때는 부모 연결을 닫으면 안 됨
+  if device.parent_assigned_child_key then return end
   -- Mark as removed so it does not reconnect
   -- 다시 연결하지 않도록 표시
   device:set_field("removed", true)
