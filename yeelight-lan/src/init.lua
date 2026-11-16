@@ -1,5 +1,9 @@
--- Yeelight LAN driver (Light Bar: front light + back light)
--- Yeelight LAN 드라이버 (Light Bar: 앞 조명 + 뒤 조명)
+-- Yeelight LAN driver
+--   Light Bar (lamp15): front light + back light
+--   Ceiling light (ceilb): main light + moonlight
+-- Yeelight LAN 드라이버
+--   Light Bar (lamp15): 앞 조명 + 뒤 조명
+--   천장등 (ceilb): 본등 + 달빛
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local socket = require "cosock.socket"
@@ -14,11 +18,18 @@ local SSDP_PORT = 1982
 -- 지원하는 모델 → 사용할 프로필
 local SUPPORTED_MODELS = {
   lamp15 = { profile = "yeelight-lightbar", label = "Yeelight Light Bar" },
+  ceilb = { profile = "yeelight-ceiling", label = "Yeelight Ceiling Light" },
 }
 
--- Properties read on refresh
--- 새로고침 때 읽어 올 값들
-local PROPS = { "power", "main_power", "bright", "ct", "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat", "bg_lmode", "bg_proact" }
+-- Properties read on refresh (a model returns "" for ones it does not have)
+-- 새로고침 때 읽어 올 값들 (모델에 없는 값은 ""로 옴)
+local PROPS = { "power", "main_power", "bright", "ct", "active_mode", "nl_br",
+  "bg_power", "bg_bright", "bg_ct", "bg_hue", "bg_sat", "bg_lmode", "bg_proact" }
+
+-- set_power mode values
+-- set_power 모드 값
+local MODE_NORMAL = 1 -- Normal (color temperature) light / 일반 조명 (색온도)
+local MODE_MOON = 5   -- Moonlight / 달빛
 
 -- Method names per component (front light / back light)
 -- 구성 요소별 명령 이름 (앞 조명 / 뒤 조명)
@@ -143,9 +154,15 @@ end
 -- 2. Applying state (device values → SmartThings)
 --    상태 반영 (기기 값 → 스마트싱스 화면)
 -------------------------------------------------------------------
+-- Emit only if this device's profile has the component (e.g. moonlight exists only on the ceiling light)
+-- 이 기기의 프로필에 그 구성 요소가 있을 때만 반영 (예: 달빛은 천장등에만 있음)
 local function emit(device, comp_id, event)
   local comp = device.profile.components[comp_id]
   if comp then device:emit_component_event(comp, event) end
+end
+
+local function has_moonlight(device)
+  return device.profile.components["moonlight"] ~= nil
 end
 
 local function switch_event(value)
@@ -165,6 +182,14 @@ local function apply_props(device, props)
         -- Front light on/off is computed once after the loop
         -- 앞 조명 켜짐/꺼짐은 반복문이 끝난 뒤에 한 번에 계산
         device:set_field(key, value)
+      elseif key == "active_mode" and num then
+        -- Main light mode (0 = normal, 1 = moonlight); switches are computed after the loop
+        -- 본등 모드 (0 = 일반, 1 = 달빛). 스위치는 반복문이 끝난 뒤에 계산
+        device:set_field("active_mode", num)
+      elseif key == "nl_br" and num and num > 0 then
+        -- Moonlight brightness (reported as 0 outside moonlight, so 0 is ignored)
+        -- 달빛 밝기 (달빛이 아닐 때는 0으로 와서 0은 무시)
+        emit(device, "moonlight", capabilities.switchLevel.level(num))
       elseif key == "bright" and num then
         emit(device, "main", capabilities.switchLevel.level(num))
       elseif key == "ct" and num then
@@ -196,9 +221,14 @@ local function apply_props(device, props)
   -- (the device may report main_power "on" while turning off, so power is checked too)
   -- 앞 조명: 전체 전원(power)과 앞 조명 전원(main_power)이 둘 다 on일 때만 켜짐
   -- (끌 때 기기가 main_power를 "on"으로 잘못 보내서 power도 같이 봐야 함)
-  if props.power or props.main_power then
+  if props.power or props.main_power or props.active_mode then
     local main_on = device:get_field("power") == "on" and device:get_field("main_power") == "on"
     emit(device, "main", switch_event(main_on and "on" or "off"))
+    -- Ceiling light: the main switch is the power (on in moonlight too);
+    -- the moonlight switch is the mode
+    -- 천장등: 본등 스위치는 전원(달빛 중에도 켜짐), 달빛 스위치는 모드
+    local moon_on = main_on and device:get_field("active_mode") == 1
+    emit(device, "moonlight", switch_event(moon_on and "on" or "off"))
   end
 end
 
@@ -472,7 +502,17 @@ local function power(device, comp_id, on)
     -- 꺼져 있는 동안 색온도나 색을 바꿨으면 그 값으로 바로 켜기 (예전 색이 잠깐 보이지 않게)
     return turn_on_with_scene(device, comp_id)
   end
-  send_command(device, METHODS[comp_id].power, { on and "on" or "off", "smooth", 500 })
+  local params = { on and "on" or "off", "smooth", 500 }
+  if on and comp_id == "main" and has_moonlight(device) then
+    -- Ceiling light: the main switch turns on the normal light (leaves moonlight)
+    -- 천장등: 본등 스위치는 일반 조명으로 켬 (달빛이면 일반으로 바뀜)
+    params[4] = MODE_NORMAL
+  end
+  send_command(device, METHODS[comp_id].power, params)
+end
+
+local function in_moonlight(device)
+  return has_moonlight(device) and is_on(device, "moonlight")
 end
 
 -- Turn on with set_scene (the saved value is used and cleared here)
@@ -485,26 +525,58 @@ function turn_on_with_scene(device, comp_id, level)
   -- so when linked, turn the back light on ourselves
   -- 기기의 앞뒤 연동은 set_power에만 적용되고 set_scene에는 적용되지 않음
   -- 그래서 연동이 켜져 있으면 앞 조명을 set_scene으로 켤 때 뒤 조명도 직접 켜 줌
-  if comp_id == "main" and device:get_field("bg_proact") == 1 and not is_on(device, "background") then
+  if comp_id == "main" and device.profile.components["background"]
+    and device:get_field("bg_proact") == 1 and not is_on(device, "background") then
     power(device, "background", true)
   end
 end
 
+-- Moonlight on: switch to moonlight (turns on if off)
+-- 달빛 켜기: 달빛으로 바꿈 (꺼져 있으면 달빛으로 켜짐)
+local function moonlight_on(device, level)
+  send_command(device, "set_power", { "on", "smooth", 500, MODE_MOON })
+  if level then
+    -- In moonlight, set_bright sets the moonlight brightness
+    -- 달빛 모드에서는 set_bright가 달빛 밝기를 바꿈
+    send_command(device, "set_bright", { level, "smooth", 300 })
+  end
+end
+
+-- Moonlight off: back to the normal light (the light stays on); does nothing if the light is off
+-- 달빛 끄기: 일반 조명으로 돌아감 (불은 켜진 채). 불이 꺼져 있으면 아무것도 안 함
+local function moonlight_off(device)
+  if not in_moonlight(device) then return end
+  power(device, "main", true)
+end
+
 local function handle_on(_, device, command)
+  if command.component == "moonlight" then return moonlight_on(device) end
   power(device, command.component, true)
 end
 
 local function handle_off(_, device, command)
+  if command.component == "moonlight" then return moonlight_off(device) end
   power(device, command.component, false)
 end
 
 local function handle_set_level(_, device, command)
   local comp_id = command.component
   local level = clamp(math.floor(command.args.level), 0, 100)
+  if comp_id == "moonlight" then
+    -- Moonlight brightness: 0 turns the light off; otherwise turn on moonlight at this level
+    -- 달빛 밝기: 0이면 조명 끄기, 아니면 그 밝기의 달빛으로 켜기
+    if level == 0 then return power(device, "main", false) end
+    if in_moonlight(device) then
+      return send_command(device, "set_bright", { level, "smooth", 300 })
+    end
+    return moonlight_on(device, level)
+  end
   if level == 0 then return power(device, comp_id, false) end
-  if not is_on(device, comp_id) then
-    -- Off: turn on at this level (same as Matter's MoveToLevelWithOnOff)
-    -- 꺼져 있으면 그 밝기로 바로 켜기 (Matter의 MoveToLevelWithOnOff와 같은 동작)
+  if not is_on(device, comp_id) or (comp_id == "main" and in_moonlight(device)) then
+    -- Off or in moonlight: turn on the normal light at this level
+    -- 꺼져 있거나 달빛 중이면 그 밝기의 일반 조명으로 켜기
+    -- (same as Matter's MoveToLevelWithOnOff)
+    -- (Matter의 MoveToLevelWithOnOff와 같은 동작)
     return turn_on_with_scene(device, comp_id, level)
   end
   send_command(device, METHODS[comp_id].bright, { level, "smooth", 300 })
@@ -513,8 +585,8 @@ end
 local function handle_set_ct(_, device, command)
   local comp_id = command.component
   local ct = clamp(math.floor(command.args.temperature), CT_MIN, CT_MAX)
-  if not is_on(device, comp_id) then
-    -- Off: save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
+  if not is_on(device, comp_id) or (comp_id == "main" and in_moonlight(device)) then
+    -- Off or in moonlight (e.g. Circadian Lighting): save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
     -- Nothing is sent, so no notification comes back; update the UI directly.
     -- 꺼져 있으면 켜지 않고 값만 저장 (Matter 표준 ExecuteIfOff와 같은 동작. 켤 때 set_scene으로 적용)
     -- 기기로 보내는 게 없어서 알림이 오지 않으므로 화면은 직접 바꿈
@@ -582,6 +654,7 @@ local function device_init(_, device)
     emit(device, comp_id, capabilities.switchLevel.levelRange({ value = { minimum = 1, maximum = 100 } }))
     emit(device, comp_id, capabilities.colorTemperature.colorTemperatureRange({ value = { minimum = CT_MIN, maximum = CT_MAX } }))
   end
+  emit(device, "moonlight", capabilities.switchLevel.levelRange({ value = { minimum = 1, maximum = 100 } }))
   refresh(device)
   device.thread:call_on_schedule(POLL_INTERVAL, function() poll(device) end, "yeelight-poll")
 end
