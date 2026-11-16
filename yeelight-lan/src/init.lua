@@ -563,16 +563,20 @@ local turn_on_with_scene
 
 -- On/off state is updated by the device's props notifications
 -- 화면의 켜짐/꺼짐은 기기가 보내는 props 알림으로 바뀜
-local function power(device, comp_id, on)
+-- normal = true forces the normal light (used to leave moonlight)
+-- normal = true면 일반 조명으로 강제 (달빛에서 나올 때 사용)
+local function power(device, comp_id, on, normal)
   if on and device:get_field("pending_" .. comp_id) then
     -- Color temperature or color was changed while off: turn on straight to it (no flash of the old color)
     -- 꺼져 있는 동안 색온도나 색을 바꿨으면 그 값으로 바로 켜기 (예전 색이 잠깐 보이지 않게)
     return turn_on_with_scene(device, comp_id)
   end
   local params = { on and "on" or "off", "smooth", 500 }
-  if on and comp_id == "main" and has_moonlight(device) then
-    -- Ceiling light: the main switch turns on the normal light (leaves moonlight)
-    -- 천장등: 본등 스위치는 일반 조명으로 켬 (달빛이면 일반으로 바뀜)
+  if on and normal then
+    -- Leave moonlight. Otherwise no mode is sent, so the light decides by itself
+    -- (e.g. the ceiling light's night light schedule set in the Yeelight app turns on moonlight)
+    -- 달빛에서 나오기. 그 밖에는 모드를 보내지 않아서 조명이 스스로 정함
+    -- (예: Yeelight 앱의 천장등 야간등 시간 설정이면 달빛으로 켜짐)
     params[4] = MODE_NORMAL
   end
   send_command(device, METHODS[comp_id].power, params)
@@ -629,7 +633,7 @@ end
 -- 달빛 끄기: 일반 조명으로 돌아감 (불은 켜진 채). 불이 꺼져 있으면 아무것도 안 함
 local function moonlight_off(device)
   if not in_moonlight(device) then return end
-  power(device, "main", true)
+  power(device, "main", true, true)
 end
 
 -- A command on a child device is handled by the parent, as that component
