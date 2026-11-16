@@ -17,7 +17,7 @@ Local SmartThings Edge drivers, no manufacturer cloud needed. · [한국어](#�
 - Instant updates from the remote and the Yeelight app; reconnects and finds a new IP by itself.
 - Circadian Lighting and Fade supported.
 - Like Matter lights: changing color while off only saves it and does not turn the light on; changing brightness turns it on.
-- Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not set off the moonlight.
+- Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not cancel the moonlight.
 - Front/back link can only be changed in the Yeelight app.
 - Color temperature: 2700–6500 K (ceiling Background: 1700–6500 K).
 
