@@ -17,7 +17,8 @@ Local SmartThings Edge drivers, no manufacturer cloud needed. · [한국어](#�
 - Instant updates from the remote and the Yeelight app; reconnects and finds a new IP by itself.
 - Circadian Lighting and Fade supported.
 - Like Matter lights: changing color while off only saves it and does not turn the light on; changing brightness turns it on.
-- Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not cancel the moonlight.
+- The ceiling light's Moonlight: the main switch is the power, the Moonlight switch is the mode. Circadian Lighting does not cancel the moonlight.
+- The ceiling light's tile shows ☀️ and the brightness for the normal light, 🌙 and the brightness for moonlight.
 - Front/back link can only be changed in the Yeelight app.
 - The ceiling light's night light schedule (set in the Yeelight app) also works when turned on from SmartThings. The schedule can only be changed in the Yeelight app.
 - Color temperature: 2700–6500 K (ceiling Background: 1700–6500 K).
@@ -45,7 +46,8 @@ Personal project, provided as is.
 - 리모컨이나 Yeelight 앱으로 바꿔도 바로 반영되며, 연결이 끊기거나 IP가 바뀌어도 스스로 다시 찾습니다.
 - 하루 조명과 페이드를 지원합니다.
 - Matter 조명처럼 꺼진 상태에서 색을 바꾸면 저장만 하고 켜지지 않습니다. 밝기를 바꾸면 켜집니다.
-- 달빛: 본등 스위치는 전원, 달빛 스위치는 모드입니다. 하루 조명이 달빛을 해제하지 않습니다.
+- 천장등 달빛: 본등 스위치는 전원, 달빛 스위치는 모드입니다. 하루 조명이 달빛을 해제하지 않습니다.
+- 천장등 기기 카드에는 일반 조명일 때 ☀️와 밝기, 달빛일 때 🌙와 밝기가 표시됩니다.
 - 앞뒤 연동은 Yeelight 앱에서만 바꿀 수 있습니다.
 - Yeelight 앱의 천장등 야간등 시간 설정은 스마트싱스에서 켤 때도 적용됩니다. (시간은 Yeelight 앱에서만 설정 가능)
 - 색온도: 2700–6500 K (천장등 배경등: 1700–6500 K)
