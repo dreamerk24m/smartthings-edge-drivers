@@ -1,0 +1,16 @@
+{
+  "name": "Light Status",
+  "attributes": {
+    "status": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string", "maxLength": 32 }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {}
+}

@@ -19,6 +19,8 @@ components:
         version: 1
       - id: synthetic.lightingEffectCircadian
         version: 1
+      - id: travellaugh21607.lightStatus
+        version: 1
     categories:
       - name: Light
   - id: moonlight
@@ -30,3 +32,95 @@ components:
         version: 1
     categories:
       - name: Light
+deviceConfig:
+  dashboard:
+    states:
+      - component: main
+        capability: switch
+        version: 1
+        group: main
+        composite: true
+      - component: main
+        capability: travellaugh21607.lightStatus
+        version: 1
+        group: main
+        composite: true
+        values:
+          - label: " | {{status.value}}"
+        visibleCondition:
+          component: main
+          capability: switch
+          version: 1
+          value: switch.value
+          valueType: string
+          operator: EQUALS
+          operand: "on"
+    actions:
+      - component: main
+        capability: switch
+        version: 1
+        group: main
+  detailView:
+    - component: main
+      capability: switch
+      version: 1
+    - component: main
+      capability: switchLevel
+      version: 1
+    - component: main
+      capability: colorTemperature
+      version: 1
+    - component: main
+      capability: refresh
+      version: 1
+    - component: main
+      capability: synthetic.lightingEffectFade
+      version: 1
+    - component: main
+      capability: synthetic.lightingEffectCircadian
+      version: 1
+    - component: moonlight
+      capability: switch
+      version: 1
+    - component: moonlight
+      capability: switchLevel
+      version: 1
+  automation:
+    conditions:
+      - component: main
+        capability: switch
+        version: 1
+      - component: main
+        capability: switchLevel
+        version: 1
+      - component: main
+        capability: colorTemperature
+        version: 1
+      - component: moonlight
+        capability: switch
+        version: 1
+      - component: moonlight
+        capability: switchLevel
+        version: 1
+    actions:
+      - component: main
+        capability: switch
+        version: 1
+      - component: main
+        capability: switchLevel
+        version: 1
+      - component: main
+        capability: colorTemperature
+        version: 1
+      - component: main
+        capability: synthetic.lightingEffectFade
+        version: 1
+      - component: main
+        capability: synthetic.lightingEffectCircadian
+        version: 1
+      - component: moonlight
+        capability: switch
+        version: 1
+      - component: moonlight
+        capability: switchLevel
+        version: 1

@@ -90,6 +90,11 @@ local METHODS = {
   background = { power = "bg_set_power", bright = "bg_set_bright", ct = "bg_set_ct_abx", scene = "bg_set_scene" },
 }
 
+-- Custom capability for the dashboard tile text (registered in the SmartThings account;
+-- definition in capabilities/ at the repository root)
+-- 기기 타일 글자용 커스텀 capability (스마트싱스 계정에 등록. 정의는 저장소 맨 위 capabilities/)
+local LIGHT_STATUS = "travellaugh21607.lightStatus"
+
 local function clamp(v, lo, hi)
   return math.max(lo, math.min(hi, v))
 end
@@ -440,6 +445,24 @@ local function switch_event(value)
   return capabilities.switch.switch.off()
 end
 
+-- Text shown on the dashboard tile next to the main switch (custom capability, ceiling light only):
+-- "100%" for the normal light, "Moonlight 15%" in moonlight. Left as is while off (the app hides it).
+-- 기기 타일에서 본등 스위치 옆에 보이는 글자 (커스텀 capability, 천장등만):
+-- 일반 조명은 "100%", 달빛은 "Moonlight 15%". 꺼져 있을 때는 그대로 둠 (앱이 숨김)
+local function update_status(device)
+  if not device:supports_capability_by_id(LIGHT_STATUS) then return end
+  if not (device:get_field("power") == "on" and device:get_field("main_power") == "on") then return end
+  local text
+  if device:get_field("active_mode") == 1 then
+    text = string.format("🌙 %d%%", device:get_field("nl_br") or 0)
+  else
+    text = string.format("☀️ %d%%", device:get_field("bright") or 0)
+  end
+  if text == device:get_field("status_text") then return end
+  device:set_field("status_text", text)
+  device:emit_event(capabilities[LIGHT_STATUS].status(text))
+end
+
 -- Apply values reported by the device (props notifications, get_prop results).
 -- State changes only here; command handlers never emit state directly.
 -- 기기가 알려 준 값(props 알림, get_prop 결과)을 화면에 반영
@@ -459,8 +482,10 @@ local function apply_props(device, props)
       elseif key == "nl_br" and num and num > 0 then
         -- Moonlight brightness (reported as 0 outside moonlight, so 0 is ignored)
         -- 달빛 밝기 (달빛이 아닐 때는 0으로 와서 0은 무시)
+        device:set_field("nl_br", num)
         emit(device, "moonlight", capabilities.switchLevel.level(num))
       elseif key == "bright" and num then
+        device:set_field("bright", num)
         emit(device, "main", capabilities.switchLevel.level(num))
       elseif key == "ct" and num then
         emit(device, "main", capabilities.colorTemperature.colorTemperature(num))
@@ -508,6 +533,9 @@ local function apply_props(device, props)
     -- 천장등: 본등 스위치는 전원(달빛 중에도 켜짐), 달빛 스위치는 모드
     local moon_on = main_on and device:get_field("active_mode") == 1
     emit(device, "moonlight", switch_event(moon_on and "on" or "off"))
+  end
+  if props.power or props.main_power or props.active_mode or props.bright or props.nl_br then
+    update_status(device)
   end
 end
 
