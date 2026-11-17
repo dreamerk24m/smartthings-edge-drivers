@@ -495,6 +495,13 @@ local function apply_props(device, props)
     -- 모드만 바뀐 경우에는 전원이 바뀌지 않음
     if props.power or props.main_power then
       emit(device, "main", switch_event(main_on and "on" or "off"))
+      -- Tell whoever is waiting for the main light to turn on (set by the commands section)
+      -- 본등이 켜지기를 기다리는 쪽에 알림 (명령 구역에서 등록)
+      local on_main_on = device:get_field("on_main_on")
+      if main_on and on_main_on then
+        device:set_field("on_main_on", nil)
+        on_main_on()
+      end
     end
     -- Ceiling light: the main switch is the power (on in moonlight too);
     -- the moonlight switch is the mode
@@ -676,11 +683,23 @@ local function send_power(device, comp_id, on, normal)
         -- Turned on without a mode: the light may start in moonlight (night light schedule).
         -- Hold color temperature for a moment until the mode is known.
         -- 모드 없이 켬: 달빛으로 켜질 수 있음(야간등 시간). 모드를 알 때까지 색온도를 잠깐 보류
-        device:set_field("settling", true)
-        device.thread:call_with_delay(1.5, function()
+        local done = false
+        local function settle()
+          if done then return end
+          done = true
+          device:set_field("on_main_on", nil)
           device:set_field("settling", nil)
           flush_pending_ct(device)
-        end)
+        end
+        device:set_field("settling", true)
+        -- The device sends the mode notification before the "on" notification,
+        -- so the mode is known once "on" arrives (about 0.2s). Wait 0.2s more in case the order differs.
+        -- 기기는 모드 알림을 켜짐 알림보다 먼저 보냄. 그래서 켜짐 알림이 오면(약 0.2초) 모드를 알고 있음
+        -- 순서가 바뀌어 올 때를 대비해 0.2초 더 기다림
+        device:set_field("on_main_on", function() device.thread:call_with_delay(0.2, settle) end)
+        -- If no notification comes, stop holding after 1.5s anyway
+        -- 알림이 오지 않으면 1.5초 뒤에 보류를 끝냄
+        device.thread:call_with_delay(1.5, settle)
       end
     end
   end
@@ -731,8 +750,13 @@ end
 -- Turn on/off. If color temperature or color was changed while off,
 -- turn on straight to it (no flash of the old color).
 -- 켜기/끄기. 꺼져 있는 동안 색온도나 색을 바꿨으면 그 값으로 바로 켜기 (예전 색이 잠깐 보이지 않게)
+-- Except the ceiling main light: set_scene forces the normal light, so it is turned on without a mode
+-- and the light decides (night light schedule). The saved value is applied once the mode is known.
+-- 천장등 본등은 예외: set_scene은 일반 조명을 강제하므로 모드 없이 켜서 조명이 정하게 함 (야간등 시간)
+-- 저장한 값은 모드를 알고 난 뒤 적용
 local function power(device, comp_id, on, normal)
-  if on and device:get_field("pending_" .. comp_id) then
+  if on and device:get_field("pending_" .. comp_id)
+    and not (comp_id == "main" and has_moonlight(device) and not normal) then
     return turn_on_with_scene(device, comp_id)
   end
   send_power(device, comp_id, on, normal)
