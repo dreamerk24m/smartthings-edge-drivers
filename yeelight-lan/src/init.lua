@@ -31,11 +31,11 @@ local MODELS = {
   lamp15 = {
     profile = "yeelight-lightbar",
     label = "Yeelight Light Bar",
-    -- props notifications report main_power wrongly ("on" when the front turns off
-    -- while the back is still on). main_power is re-read with get_prop instead.
-    -- props 알림의 main_power가 틀리게 옴 (뒤 조명이 켜져 있으면 앞 조명을 꺼도 "on")
+    -- props notifications report main_power and bg_power wrongly when only one light turns off
+    -- ("on" while the other light is still on). They are re-read with get_prop instead.
+    -- props 알림의 main_power, bg_power가 한쪽만 끌 때 틀리게 옴 (다른 쪽이 켜져 있으면 꺼도 "on")
     -- 그래서 get_prop으로 다시 읽음
-    unreliable_main_power = true,
+    unreliable_power = true,
   },
   ceilb = {
     profile = "yeelight-ceiling",
@@ -511,15 +511,15 @@ local function apply_props(device, props)
   end
 end
 
--- Re-check the front light on/off with get_prop (runs once even if called several times within 0.5s)
--- 앞 조명 켜짐/꺼짐을 get_prop으로 다시 확인 (0.5초 안에 여러 번 불려도 한 번만 확인)
-local function verify_main(device)
+-- Re-check front/back light on/off with get_prop (runs once even if called several times within 0.5s)
+-- 앞뒤 조명 켜짐/꺼짐을 get_prop으로 다시 확인 (0.5초 안에 여러 번 불려도 한 번만 확인)
+local function verify_power(device)
   if device:get_field("verify_timer") then return end
   local timer = device.thread:call_with_delay(0.5, function()
     device:set_field("verify_timer", nil)
-    send_command(device, "get_prop", { "power", "main_power" }, function(result)
+    send_command(device, "get_prop", { "power", "main_power", "bg_power" }, function(result)
       if type(result) == "table" then
-        apply_props(device, { power = result[1], main_power = result[2] })
+        apply_props(device, { power = result[1], main_power = result[2], bg_power = result[3] })
       end
     end)
   end)
@@ -529,18 +529,19 @@ end
 -- Handle a props notification pushed by the device
 -- 기기가 보낸 props 알림 처리
 local function handle_props(device, params)
-  if params.main_power ~= nil and model_info(device).unreliable_main_power then
-    -- main_power in notifications is unreliable (it says "on" when the front turns off
-    -- while the back is still on). Ignore it and re-read with get_prop shortly (get_prop is correct).
-    -- 알림의 main_power는 믿을 수 없음 (뒤 조명이 켜져 있으면 앞 조명을 꺼도 "on"으로 옴)
+  if (params.main_power ~= nil or params.bg_power ~= nil) and model_info(device).unreliable_power then
+    -- main_power and bg_power in notifications are unreliable (they say "on" when one light turns off
+    -- while the other is still on). Ignore them and re-read with get_prop shortly (get_prop is correct).
+    -- 알림의 main_power, bg_power는 믿을 수 없음 (다른 쪽이 켜져 있으면 한쪽을 꺼도 "on"으로 옴)
     -- 그래서 이 값은 쓰지 않고 잠시 뒤 get_prop으로 다시 읽어서 반영 (get_prop 값은 정확함)
     -- power in the same notification is dropped too: alone it would show a wrong on/off for a moment
     -- (e.g. "off" while turning on), and a command arriving in that moment would be handled as if off
     -- 같은 알림의 power도 버림: 이것만으로 계산하면 잠깐 틀린 켜짐/꺼짐이 올라가고
     -- (예: 켜는 중에 "꺼짐"), 그 사이에 온 명령이 꺼진 상태로 처리됨
     params.main_power = nil
+    params.bg_power = nil
     params.power = nil
-    verify_main(device)
+    verify_power(device)
   end
   apply_props(device, params)
 end
