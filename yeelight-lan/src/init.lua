@@ -50,6 +50,13 @@ local CT_RANGES = {
   ceilb = { background = { 1700, 6500 } }, -- RGB background light / RGB 배경등
 }
 
+-- Models whose props notifications report main_power wrongly
+-- (Light Bar: "on" when the front turns off while the back is still on).
+-- For these, main_power is re-read with get_prop instead.
+-- props 알림의 main_power가 틀리게 오는 모델
+-- (Light Bar: 뒤 조명이 켜져 있으면 앞 조명을 꺼도 "on"으로 옴). 이 모델은 get_prop으로 다시 읽음
+local UNRELIABLE_MAIN_POWER = { lamp15 = true }
+
 -- Models without bg_set_scene (checked with the SSDP "support" list)
 -- bg_set_scene이 없는 모델 (검색 응답의 "support" 목록으로 확인)
 local NO_BG_SET_SCENE = { ceilb = true }
@@ -288,7 +295,11 @@ local function apply_props(device, props)
   -- (끌 때 기기가 main_power를 "on"으로 잘못 보내서 power도 같이 봐야 함)
   if props.power or props.main_power or props.active_mode then
     local main_on = device:get_field("power") == "on" and device:get_field("main_power") == "on"
-    emit(device, "main", switch_event(main_on and "on" or "off"))
+    -- A mode change alone does not change the power
+    -- 모드만 바뀐 경우에는 전원이 바뀌지 않음
+    if props.power or props.main_power then
+      emit(device, "main", switch_event(main_on and "on" or "off"))
+    end
     -- Ceiling light: the main switch is the power (on in moonlight too);
     -- the moonlight switch is the mode
     -- 천장등: 본등 스위치는 전원(달빛 중에도 켜짐), 달빛 스위치는 모드
@@ -320,12 +331,17 @@ local function handle_line(device, line)
     -- 기기가 먼저 알려 준 변경 사항 (스마트싱스, 리모컨, Yeelight 앱 등 모두 여기로 들어옴)
     log.debug("[yeelight] props: " .. line)
     local params = decoded.params
-    if params.main_power ~= nil then
+    if params.main_power ~= nil and UNRELIABLE_MAIN_POWER[model_of(device)] then
       -- main_power in notifications is unreliable (it says "on" when the front turns off
       -- while the back is still on). Ignore it and re-read with get_prop shortly (get_prop is correct).
       -- 알림의 main_power는 믿을 수 없음 (뒤 조명이 켜져 있으면 앞 조명을 꺼도 "on"으로 옴)
       -- 그래서 이 값은 쓰지 않고 잠시 뒤 get_prop으로 다시 읽어서 반영 (get_prop 값은 정확함)
+      -- power in the same notification is dropped too: alone it would show a wrong on/off for a moment
+      -- (e.g. "off" while turning on), and a command arriving in that moment would be handled as if off
+      -- 같은 알림의 power도 버림: 이것만으로 계산하면 잠깐 틀린 켜짐/꺼짐이 올라가고
+      -- (예: 켜는 중에 "꺼짐"), 그 사이에 온 명령이 꺼진 상태로 처리됨
       params.main_power = nil
+      params.power = nil
       verify_main(device)
     end
     apply_props(device, params)
@@ -515,7 +531,19 @@ local function clamp(v, lo, hi)
   return math.max(lo, math.min(hi, v))
 end
 
+-- On/off we just sent, kept for a few seconds until the device's notification arrives.
+-- Commands that follow right after (e.g. Circadian Lighting with a routine's turn-on) then see the new state.
+-- 방금 보낸 켜기/끄기를 기기 알림이 올 때까지 몇 초 기억
+-- 바로 뒤에 오는 명령(예: 루틴의 켜기와 같이 오는 하루 조명)이 새 상태를 보게 됨
+local EXPECT_SECONDS = 3
+
+local function expect(device, comp_id, on)
+  device:set_field("expect_" .. comp_id, { on = on, at = os.time() })
+end
+
 local function is_on(device, comp_id)
+  local e = device:get_field("expect_" .. comp_id)
+  if e and os.time() - e.at <= EXPECT_SECONDS then return e.on end
   return latest(device, comp_id, capabilities.switch.ID, capabilities.switch.switch.NAME) == "on"
 end
 
@@ -559,7 +587,7 @@ end
 
 -- Defined below (declared first because it and power call each other)
 -- 아래에서 정의 (power와 서로 부르기 때문에 이름만 먼저 선언)
-local turn_on_with_scene
+local turn_on_with_scene, flush_pending_ct
 
 -- On/off state is updated by the device's props notifications
 -- 화면의 켜짐/꺼짐은 기기가 보내는 props 알림으로 바뀜
@@ -580,10 +608,45 @@ local function power(device, comp_id, on, normal)
     params[4] = MODE_NORMAL
   end
   send_command(device, METHODS[comp_id].power, params)
+
+  expect(device, comp_id, on)
+  if comp_id == "main" then
+    -- The device link also turns the back light on/off with set_power
+    -- 기기 연동이면 set_power로 뒤 조명도 같이 켜지고 꺼짐
+    if state_target(device, "background") and device:get_field("bg_proact") == 1 then
+      expect(device, "background", on)
+    end
+    if has_moonlight(device) then
+      if not on or normal then
+        expect(device, "moonlight", false)
+      else
+        -- Turned on without a mode: the light may start in moonlight (night light schedule).
+        -- Hold color temperature for a moment until the mode is known.
+        -- 모드 없이 켬: 달빛으로 켜질 수 있음(야간등 시간). 모드를 알 때까지 색온도를 잠깐 보류
+        device:set_field("settling", true)
+        device.thread:call_with_delay(1.5, function()
+          device:set_field("settling", nil)
+          flush_pending_ct(device)
+        end)
+      end
+    end
+  end
 end
 
 local function in_moonlight(device)
   return has_moonlight(device) and is_on(device, "moonlight")
+end
+
+-- After the mode is known: send the held color temperature if the normal light is on.
+-- In moonlight or when off, it stays saved and is applied later.
+-- 모드를 알고 난 뒤: 일반 조명이 켜져 있으면 보류한 색온도를 보냄
+-- 달빛이거나 꺼져 있으면 저장된 채로 두었다가 나중에 적용
+function flush_pending_ct(device)
+  local pending = device:get_field("pending_main")
+  if pending and pending.kind == "ct" and is_on(device, "main") and not in_moonlight(device) then
+    device:set_field("pending_main", nil)
+    send_command(device, "set_ct_abx", { pending.ct, "smooth", 300 })
+  end
 end
 
 -- Turn on with set_scene (the saved value is used and cleared here)
@@ -591,6 +654,12 @@ end
 function turn_on_with_scene(device, comp_id, level)
   local params = scene_params(device, comp_id, level)
   device:set_field("pending_" .. comp_id, nil)
+  expect(device, comp_id, true)
+  if comp_id == "main" then
+    -- set_scene turns on the normal light
+    -- set_scene은 일반 조명으로 켬
+    expect(device, "moonlight", false)
+  end
   if comp_id == "background" and NO_BG_SET_SCENE[model_of(device)] then
     -- No bg_set_scene: turn on in the right mode (1 = color temperature, 3 = HSV), then set the values.
     -- The values are sent "sudden" so they apply while the light is still fading in.
@@ -622,6 +691,8 @@ end
 -- 달빛 켜기: 달빛으로 바꿈 (꺼져 있으면 달빛으로 켜짐)
 local function moonlight_on(device, level)
   send_command(device, "set_power", { "on", "smooth", 500, MODE_MOON })
+  expect(device, "main", true)
+  expect(device, "moonlight", true)
   if level then
     -- In moonlight, set_bright sets the moonlight brightness
     -- 달빛 모드에서는 set_bright가 달빛 밝기를 바꿈
@@ -673,8 +744,9 @@ local function handle_set_level(_, device, command)
     return moonlight_on(device, level)
   end
   if level == 0 then return power(device, comp_id, false) end
-  if not is_on(device, comp_id) or (comp_id == "main" and in_moonlight(device)) then
-    -- Off or in moonlight: turn on the normal light at this level
+  if not is_on(device, comp_id)
+    or (comp_id == "main" and (in_moonlight(device) or device:get_field("settling"))) then
+    -- Off, in moonlight, or just turned on: turn on the normal light at this level
     -- 꺼져 있거나 달빛 중이면 그 밝기의 일반 조명으로 켜기
     -- (same as Matter's MoveToLevelWithOnOff)
     -- (Matter의 MoveToLevelWithOnOff와 같은 동작)
@@ -688,8 +760,9 @@ local function handle_set_ct(_, device, command)
   device, comp_id = resolve(device, command)
   local lo, hi = ct_range(device, comp_id)
   local ct = clamp(math.floor(command.args.temperature), lo, hi)
-  if not is_on(device, comp_id) or (comp_id == "main" and in_moonlight(device)) then
-    -- Off or in moonlight (e.g. Circadian Lighting): save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
+  if not is_on(device, comp_id)
+    or (comp_id == "main" and (in_moonlight(device) or device:get_field("settling"))) then
+    -- Off, in moonlight, or just turned on with the mode not known yet (e.g. Circadian Lighting): save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
     -- Nothing is sent, so no notification comes back; update the UI directly.
     -- 꺼져 있으면 켜지 않고 값만 저장 (Matter 표준 ExecuteIfOff와 같은 동작. 켤 때 set_scene으로 적용)
     -- 기기로 보내는 게 없어서 알림이 오지 않으므로 화면은 직접 바꿈
