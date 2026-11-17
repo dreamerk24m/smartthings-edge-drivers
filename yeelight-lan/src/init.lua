@@ -446,9 +446,9 @@ local function switch_event(value)
 end
 
 -- Text shown on the dashboard tile next to the main switch (custom capability, ceiling light only):
--- "100%" for the normal light, "Moonlight 15%" in moonlight. Left as is while off (the app hides it).
+-- "☀️ 100%" for the normal light, "🌙 15%" in moonlight. Left as is while off (hidden by the profile).
 -- 기기 타일에서 본등 스위치 옆에 보이는 글자 (커스텀 capability, 천장등만):
--- 일반 조명은 "100%", 달빛은 "Moonlight 15%". 꺼져 있을 때는 그대로 둠 (앱이 숨김)
+-- 일반 조명은 "☀️ 100%", 달빛은 "🌙 15%". 꺼져 있을 때는 그대로 둠 (프로필 설정으로 숨김)
 local function update_status(device)
   if not device:supports_capability_by_id(LIGHT_STATUS) then return end
   if not (device:get_field("power") == "on" and device:get_field("main_power") == "on") then return end

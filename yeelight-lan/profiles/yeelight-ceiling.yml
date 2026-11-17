@@ -60,31 +60,6 @@ deviceConfig:
         capability: switch
         version: 1
         group: main
-  detailView:
-    - component: main
-      capability: switch
-      version: 1
-    - component: main
-      capability: switchLevel
-      version: 1
-    - component: main
-      capability: colorTemperature
-      version: 1
-    - component: main
-      capability: refresh
-      version: 1
-    - component: main
-      capability: synthetic.lightingEffectFade
-      version: 1
-    - component: main
-      capability: synthetic.lightingEffectCircadian
-      version: 1
-    - component: moonlight
-      capability: switch
-      version: 1
-    - component: moonlight
-      capability: switchLevel
-      version: 1
   automation:
     conditions:
       - component: main
