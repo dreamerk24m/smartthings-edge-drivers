@@ -6,9 +6,44 @@ local json = require "st.json"
 
 local M = {}
 
--- Reuse temperature and humidity measurement.
--- 기존 온습도 측정 기능 재사용.
-M.apply = thermo_hygro.apply
+local THERMO_CHILD_KEY = "thermo-hygro"
+local THERMO_CHILD_PROFILE = "tuya-ir-thermo-hygro"
+
+-- Create the temperature and humidity child device.
+-- 온습도계 자식 기기 생성.
+function M.create_children(driver, device, product)
+  if device:get_child_by_parent_assigned_key(THERMO_CHILD_KEY) then
+    return
+  end
+
+  local ok, err = driver:try_create_device({
+    type = "EDGE_CHILD",
+    label = "IR Temperature & Humidity Sensor",
+    profile = THERMO_CHILD_PROFILE,
+    manufacturer = "Tuya",
+    parent_device_id = device.id,
+    parent_assigned_child_key = THERMO_CHILD_KEY,
+  })
+
+  log.info(string.format(
+    "%s: create thermo child -> %s %s",
+    device.device_network_id,
+    tostring(ok),
+    tostring(err)
+  ))
+end
+
+-- Send measurements to the child device.
+-- 측정값을 온습도계 자식 기기로 전달.
+function M.apply(device, product, dps)
+  local child = device:get_child_by_parent_assigned_key(
+    THERMO_CHILD_KEY
+  )
+
+  if child then
+    thermo_hygro.apply(child, product, dps)
+  end
+end
 
 -- Learn an IR code.
 -- IR 신호 학습.

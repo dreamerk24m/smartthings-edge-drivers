@@ -189,7 +189,26 @@ local function handle_ir_learn(driver, device, command)
 end
 
 local function handle_refresh(driver, device, command)
-  poll(device)
+  if is_configured(device.preferences or {}) then
+    poll(device)
+    return
+  end
+
+  local ok, parent = pcall(device.get_parent_device, device)
+  if not ok or not parent then return end
+
+  local product = PRODUCTS[(parent.preferences or {}).productId]
+  if not product or product.kind ~= "ir_blaster" then return end
+
+  local child = parent:get_child_by_parent_assigned_key(
+    "thermo-hygro"
+  )
+
+  if child and child.id == device.id then
+    parent.thread:call_with_delay(0, function()
+      poll(parent)
+    end)
+  end
 end
 
 ---------------------------------------------------------------------------
