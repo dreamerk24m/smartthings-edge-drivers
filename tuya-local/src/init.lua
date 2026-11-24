@@ -416,6 +416,10 @@ local function handle_switch(driver, device, command)
   run_control(parent, targets, is_on, 1)
 end
 
+local function handle_refresh(driver, device, command)
+  poll(device)
+end
+
 ---------------------------------------------------------------------------
 -- Lifecycle / 기기 생명주기
 ---------------------------------------------------------------------------
@@ -465,6 +469,9 @@ local driver = Driver("tuya-local", {
     [capabilities.switch.ID] = {
       [capabilities.switch.commands.on.NAME] = handle_switch,
       [capabilities.switch.commands.off.NAME] = handle_switch,
+    },
+    [capabilities.refresh.ID] = {
+      [capabilities.refresh.commands.refresh.NAME] = handle_refresh,
     },
   },
 })
