@@ -49,6 +49,14 @@ deviceConfig:
               value: switch.value
               "on": "on"
               "off": "off"
+              label: "{{switch.value}}"
+              alternatives:
+                - key: "on"
+                  value: "On"
+                  type: active
+                - key: "off"
+                  value: "Off"
+                  type: inactive
         - op: remove
           path: /0/standbyPowerSwitch
   automation:
