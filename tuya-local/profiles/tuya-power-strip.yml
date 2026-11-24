@@ -65,3 +65,130 @@ preferences:
       minLength: 16
       maxLength: 16
       default: "0000000000000000"
+
+deviceConfig:
+  dashboard:
+    states:
+      - component: main
+        capability: switch
+        version: 1
+        idx: 0
+        group: main
+        values: []
+        composite: true
+      - component: main
+        capability: powerMeter
+        version: 1
+        idx: 0
+        group: main
+        values:
+          - label: " | {{power.value}}{{power.unit}}"
+        composite: true
+    actions:
+      - component: main
+        capability: switch
+        version: 1
+        idx: 0
+        group: main
+        inline: null
+    basicPlus: []
+  detailView:
+    - component: main
+      capability: switch
+      version: 1
+      values: []
+      patch: []
+    - component: main
+      capability: powerMeter
+      version: 1
+      values: []
+      patch: []
+    - component: outlet1
+      capability: switch
+      version: 1
+      values: []
+      patch: []
+    - component: outlet2
+      capability: switch
+      version: 1
+      values: []
+      patch: []
+    - component: outlet3
+      capability: switch
+      version: 1
+      values: []
+      patch: []
+    - component: outlet4
+      capability: switch
+      version: 1
+      values: []
+      patch: []
+  automation:
+    conditions:
+      - component: main
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: main
+        capability: powerMeter
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet1
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet2
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet3
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet4
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+    actions:
+      - component: main
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet1
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet2
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet3
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
+      - component: outlet4
+        capability: switch
+        version: 1
+        values: []
+        patch: []
+        exclusion: []
