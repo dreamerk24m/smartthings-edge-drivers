@@ -91,6 +91,13 @@ function tuya.parse(packet, local_key)
   local cmd = string.unpack(">I4", packet, 9)
   local retcode = string.unpack(">I4", packet, 17)
   local enc = packet:sub(21, size - 8)
+
+  -- Remove the protocol 3.3 header if present.
+  -- 프로토콜 3.3 헤더가 있으면 제거.
+  if enc:sub(1, 3) == "3.3" then
+    enc = enc:sub(#PROTOCOL_33_HEADER + 1)
+  end
+
   if #enc == 0 then return cmd, retcode, "" end
   if #enc % 16 ~= 0 then return nil, "bad payload length" end
 

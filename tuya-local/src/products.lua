@@ -16,7 +16,14 @@ local PRODUCTS = {
     hour_off = "104",
     minute_off = "105"
   },     -- thermo-hygrometer / 온습도계
-  ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
+  ["whs3cty93fzrqkpt"] = {
+    kind = "ir_blaster",
+    profile = "tuya-thermo-hygro",
+    temperature = "101",
+    humidity = "102",
+    ir_send = "201",
+    ir_learn = "202"
+  }, -- thermo-hygrometer with IR / IR 블래스터 온습도
   ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
 }
 return PRODUCTS

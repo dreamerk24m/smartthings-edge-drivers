@@ -101,7 +101,118 @@ local function send_control(ip, dev_id, key, dps)
   return true
 end
 
+-- Learn an IR code over a persistent TCP connection.
+-- TCP 연결을 유지하면서 IR 코드를 학습함.
+local function learn_ir(ip, dev_id, key, send_dp, learn_dp, timeout)
+  local tcp = socket.tcp()
+  tcp:settimeout(TIMEOUT)
+
+  local ok, err = tcp:connect(ip, PORT)
+  if not ok then
+    tcp:close()
+    return nil, "connect failed: " .. tostring(err)
+  end
+
+  local function send_mode(mode)
+    seq = seq + 1
+
+    local dps = {
+      [send_dp] = json.encode({ control = mode })
+    }
+
+    local packet = tuya.build_control(
+      dev_id, key, seq, tostring(os.time()), dps
+    )
+
+    local sent, serr = tcp:send(packet)
+
+    if not sent then
+      return nil, "send failed: " .. tostring(serr)
+    end
+
+    return true
+  end
+
+  local function receive_code()
+    -- Reset the previous learning session.
+    local sent, serr = send_mode("study_exit")
+    if not sent then return nil, serr end
+
+    -- Start learning.
+    sent, serr = send_mode("study")
+    if not sent then return nil, serr end
+
+    log.info("IR: waiting for remote signal")
+
+    local deadline = os.time() + timeout
+
+    while os.time() < deadline do
+      tcp:settimeout(math.max(1, deadline - os.time()))
+
+      local packet, perr = read_packet(tcp)
+      if not packet then
+        return nil, perr
+      end
+
+      local cmd, retcode, plain = tuya.parse(packet, key)
+
+      if not cmd then
+        return nil, "IR parse failed: " .. tostring(retcode)
+      end
+
+      log.info(string.format(
+        "IR reply: cmd=%d retcode=%d size=%d",
+        cmd, retcode, #plain
+      ))
+
+      if retcode ~= 0 then
+        return nil, "IR device error: " .. tostring(retcode)
+      end
+
+      if cmd == 0x08 and plain ~= "" then
+        local decoded = json.decode(plain)
+
+        if type(decoded) == "table"
+            and type(decoded.dps) == "table" then
+
+          local code = decoded.dps[learn_dp]
+
+          if type(code) == "string" and #code > 0 then
+            log.info("IR: code received")
+            return code
+          end
+        end
+      end
+    end
+
+    return nil, "IR learning timeout"
+  end
+
+  local success, code, receive_err = pcall(receive_code)
+
+  -- Exit learning mode even after a failure.
+  -- 학습에 실패해도 학습 모드를 종료함.
+  local cleanup_ok, cleanup_result, cleanup_err = pcall(function()
+    tcp:settimeout(TIMEOUT)
+    return send_mode("study_exit")
+  end)
+
+  if not cleanup_ok or not cleanup_result then
+    log.warn("IR: study_exit failed: " ..
+      tostring(cleanup_ok and cleanup_err or cleanup_result))
+  end
+
+  tcp:close()
+
+  if not success then
+    return nil, tostring(code)
+  end
+
+  return code, receive_err
+end
+
 return {
   query_status = query_status,
   send_control = send_control,
+  learn_ir = learn_ir,
 }

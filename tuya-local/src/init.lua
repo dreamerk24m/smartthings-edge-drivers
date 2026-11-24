@@ -11,6 +11,7 @@ local handlers = {
   thermo_hygro = require "devices.thermo_hygro",
   thermo_hygro_led = require "devices.thermo_hygro_led",
   power_strip = require "devices.power_strip",
+  ir_blaster = require "devices.ir_blaster",
 }
 
 local query_status = transport.query_status
@@ -168,6 +169,25 @@ local function handle_led_time(driver, device, command)
   end
 end
 
+local function handle_ir_learn(driver, device, command)
+  local p = device.preferences or {}
+  local product = PRODUCTS[p.productId]
+
+  if not product or product.kind ~= "ir_blaster" then
+    return
+  end
+
+  if not is_configured(p) then return end
+
+  local handler = handlers[product.kind]
+
+  if command.component == "main" then
+    handler.learn(device, product)
+  elseif command.component == "irSendTest" then
+    handler.send(device, product, run_dps_control)
+  end
+end
+
 local function handle_refresh(driver, device, command)
   poll(device)
 end
@@ -244,6 +264,9 @@ local driver = Driver("tuya-local", {
       },
       [ledTime.ID] = {
         [ledTime.commands.setTime.NAME] = handle_led_time,
+      },
+      [capabilities.momentary.ID] = {
+        [capabilities.momentary.commands.push.NAME] = handle_ir_learn,
       },
     },
 })
