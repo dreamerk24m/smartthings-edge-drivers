@@ -26,7 +26,7 @@ local MAX_PACKET_SIZE = 4096  -- sanity limit / 비정상 패킷 방지
 -- Temperature value is temperature x 10, humidity is percent.
 -- 알려진 제품: 제품 ID -> 사용할 프로필과 DP 번호. 온도 값은 온도 x 10, 습도는 %.
 local PRODUCTS = {
-  ["o2c5btmpepi9pzf8"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
+  ["o2c5btmpepi9pzf8"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro-led", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
   ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
   ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
 }
