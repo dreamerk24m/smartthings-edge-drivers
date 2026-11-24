@@ -26,7 +26,13 @@ local MAX_PACKET_SIZE = 4096  -- sanity limit / 비정상 패킷 방지
 -- Temperature value is temperature x 10, humidity is percent.
 -- 알려진 제품: 제품 ID -> 사용할 프로필과 DP 번호. 온도 값은 온도 x 10, 습도는 %.
 local PRODUCTS = {
-  ["o2c5btmpepi9pzf8"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro-led", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
+  ["o2c5btmpepi9pzf8"] = {
+    kind = "thermo_hygro",
+    profile = "tuya-thermo-hygro-led",
+    temperature = "1",
+    humidity = "2",
+    display = "21"
+  },     -- thermo-hygrometer / 온습도계
   ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
   ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
 }
@@ -180,14 +186,34 @@ end
 
 local function apply_thermo_hygro(device, product, dps)
   local temp, hum = dps[product.temperature], dps[product.humidity]
+
   if type(temp) == "number" then
-    emit(device, capabilities.temperatureMeasurement.temperature({ value = temp / 10, unit = "C" }))
+    emit(device, capabilities.temperatureMeasurement.temperature({
+      value = temp / 10,
+      unit = "C"
+    }))
   end
+
   if type(hum) == "number" then
     emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
   end
+
+  -- LED display state / LED 디스플레이 상태
+  if product.display then
+    local display = dps[product.display]
+
+    if type(display) == "boolean" then
+      emit_component(device, "display", switch_event(display))
+
+      log.info(string.format("%s: display=%s",
+        device.device_network_id, tostring(display)))
+    end
+  end
+
   log.info(string.format("%s: temperature=%s humidity=%s",
-    device.device_network_id, tostring(type(temp) == "number" and temp / 10 or nil), tostring(hum)))
+    device.device_network_id,
+    tostring(type(temp) == "number" and temp / 10 or nil),
+    tostring(hum)))
 end
 
 -- Outlet states go to the child devices and to the outlet components of this device.
@@ -347,7 +373,25 @@ local function handle_switch(driver, device, command)
   local parent = (found and parent_device) or device
 
   local product = PRODUCTS[(parent.preferences or {}).productId]
-  if not product or product.kind ~= "power_strip" then return end
+
+  if not product then return end
+
+  -- Thermo-hygrometer LED control / 온습도계 LED 제어
+  if product.kind == "thermo_hygro" then
+    if parent == device and
+      command.component == "display" and
+      product.display then
+
+      log.info(string.format("%s: display -> %s",
+        device.device_network_id, command.command))
+
+      run_control(parent, { product.display }, is_on, 1)
+    end
+
+    return
+  end
+
+  if product.kind ~= "power_strip" then return end
 
   local targets = {}
   if parent == device then
