@@ -39,3 +39,13 @@ preferences:
       minLength: 16
       maxLength: 16
       default: "0000000000000000"
+  - name: productId
+    title: "Product ID"
+    description: "Tuya product ID (16 characters)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 16
+      maxLength: 16
+      default: "0000000000000000"

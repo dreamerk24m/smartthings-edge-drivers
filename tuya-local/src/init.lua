@@ -1,6 +1,8 @@
 -- Tuya Local (LAN) driver for SmartThings Edge
--- Polls a Tuya Wi-Fi thermo-hygrometer (protocol 3.3) over TCP and shows temperature / humidity.
+-- Polls Tuya Wi-Fi thermo-hygrometers (protocol 3.3) over TCP and shows temperature / humidity.
+-- The device type is chosen from the product ID entered in the settings.
 -- Tuya 와이파이 온습도계(프로토콜 3.3)를 TCP로 주기적으로 조회해서 온도와 습도를 표시함.
+-- 기기 종류는 설정에 입력한 제품 ID로 정함.
 
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
@@ -11,7 +13,8 @@ local tuya = require "tuya"
 
 local socket = cosock.socket
 
-local PROFILE = "tuya-thermo-hygro"
+-- Profile used until the product ID is known / 제품 ID를 알기 전까지 쓰는 초기 프로필
+local SETUP_PROFILE = "tuya-setup"
 
 local POLL_INTERVAL = 60      -- seconds between polls / 조회 간격(초)
 local TIMEOUT = 5             -- seconds for connect and each receive / 연결·수신 대기(초)
@@ -19,10 +22,13 @@ local PORT = 6668             -- Tuya local TCP port / Tuya 로컬 TCP 포트
 local MAX_PACKETS = 5         -- packets to read while waiting for the status reply / 상태 응답을 기다리며 읽을 최대 패킷 수
 local MAX_PACKET_SIZE = 4096  -- sanity limit / 비정상 패킷 방지
 
--- Datapoint numbers of this device (thermo-hygrometer without IR).
--- 이 기기(IR 없는 온습도계)의 DP 번호.
-local DP_TEMPERATURE = "1"    -- value is temperature x 10 / 온도 x 10
-local DP_HUMIDITY = "2"       -- percent / 습도(%)
+-- Known products: product ID -> profile to use and datapoint numbers.
+-- Temperature value is temperature x 10, humidity is percent.
+-- 알려진 제품: 제품 ID -> 사용할 프로필과 DP 번호. 온도 값은 온도 x 10, 습도는 %.
+local PRODUCTS = {
+  ["o2c5btmpepi9pzf8"] = { profile = "tuya-thermo-hygro", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
+  ["whs3cty93fzrqkpt"] = { profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
+}
 
 local seq = 0
 
@@ -30,10 +36,12 @@ local seq = 0
 -- Settings check / 설정 확인
 ---------------------------------------------------------------------------
 
--- True when IP, device ID and key are filled in (not the placeholder defaults).
--- IP, 기기 ID, 키가 기본값이 아닌 실제 값으로 채워졌는지 확인.
+-- True when IP, device ID, key and product ID are filled in (not the placeholder defaults).
+-- IP, 기기 ID, 키, 제품 ID가 기본값이 아닌 실제 값으로 채워졌는지 확인.
 local function is_configured(p)
   local ip, id, key = p.deviceIp or "", p.deviceId or "", p.localKey or ""
+  local pid = p.productId or ""
+  if #pid ~= 16 or pid == string.rep("0", 16) then return false end
   if not ip:match("^%d+%.%d+%.%d+%.%d+$") or ip == "0.0.0.0" then return false end
   if #id ~= 20 and #id ~= 22 then return false end
   if id == string.rep("0", 20) then return false end
@@ -114,10 +122,19 @@ end
 -- Polling / 주기 조회
 ---------------------------------------------------------------------------
 
+-- Emit an event without letting an error (e.g. profile not switched yet) stop the driver.
+-- 프로필이 아직 안 바뀐 경우 등의 오류로 드라이버가 멈추지 않게 이벤트를 보냄.
+local function emit(device, event)
+  local ok, err = pcall(device.emit_event, device, event)
+  if not ok then log.warn(device.device_network_id .. ": could not emit event: " .. tostring(err)) end
+end
+
 local function poll(device)
   if device:get_field("polling") then return end
   local p = device.preferences
   if not is_configured(p) then return end
+  local product = PRODUCTS[p.productId]
+  if not product then return end
 
   device:set_field("polling", true)
   local ok, dps, err = pcall(query_status, p.deviceIp, p.deviceId, p.localKey)
@@ -132,12 +149,12 @@ local function poll(device)
     return
   end
 
-  local temp, hum = dps[DP_TEMPERATURE], dps[DP_HUMIDITY]
+  local temp, hum = dps[product.temperature], dps[product.humidity]
   if type(temp) == "number" then
-    device:emit_event(capabilities.temperatureMeasurement.temperature({ value = temp / 10, unit = "C" }))
+    emit(device, capabilities.temperatureMeasurement.temperature({ value = temp / 10, unit = "C" }))
   end
   if type(hum) == "number" then
-    device:emit_event(capabilities.relativeHumidityMeasurement.humidity(hum))
+    emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
   end
   log.info(string.format("%s: temperature=%s humidity=%s",
     device.device_network_id, tostring(type(temp) == "number" and temp / 10 or nil), tostring(hum)))
@@ -155,9 +172,22 @@ end
 -- 조회 타이머를 (다시) 걸고 바로 한 번 조회함. 설정이 채워지기 전에는 아무것도 안 함.
 local function start_polling(device)
   stop_polling(device)
-  if not is_configured(device.preferences) then
+  local p = device.preferences
+  if not is_configured(p) then
     log.info(device.device_network_id .. ": settings not complete yet, not polling")
     return
+  end
+  local product = PRODUCTS[p.productId]
+  if not product then
+    log.warn(device.device_network_id .. ": unknown product ID " .. tostring(p.productId) .. ", not polling")
+    return
+  end
+  -- Switch to the profile of this product once (remembered across restarts).
+  -- 이 제품의 프로필로 한 번만 바꿈(재시작해도 기억).
+  if device:get_field("applied_profile") ~= product.profile then
+    device:set_field("applied_profile", product.profile, { persist = true })
+    log.info(device.device_network_id .. ": switching profile to " .. product.profile)
+    device:try_update_metadata({ profile = product.profile })
   end
   local timer = device.thread:call_on_schedule(POLL_INTERVAL, function() poll(device) end, "tuya-poll")
   device:set_field("poll_timer", timer)
@@ -176,10 +206,10 @@ local function discovery_handler(driver, _, _)
   driver:try_create_device({
     type = "LAN",
     device_network_id = dni,
-    label = "Tuya Thermo-Hygrometer",
-    profile = PROFILE,
+    label = "Tuya Device",
+    profile = SETUP_PROFILE,
     manufacturer = "Tuya",
-    model = "Thermo-Hygrometer",
+    model = "Tuya Device",
   })
 end
 
@@ -196,8 +226,8 @@ end
 -- Local Key는 로그에 남기지 않고 글자 수만 남김.
 local function info_changed(_, device, _, _)
   local p = device.preferences
-  log.info(string.format("%s: settings changed ip=%s id=%s key_len=%d",
-    device.device_network_id, tostring(p.deviceIp), tostring(p.deviceId), #(p.localKey or "")))
+  log.info(string.format("%s: settings changed ip=%s id=%s product=%s key_len=%d",
+    device.device_network_id, tostring(p.deviceIp), tostring(p.deviceId), tostring(p.productId), #(p.localKey or "")))
   start_polling(device)
 end
 
