@@ -1,0 +1,20 @@
+{
+  "dashboard": {
+    "states": [],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "LED Time",
+      "displayType": "textField",
+      "textField": {
+        "command": "setTime",
+        "value": "time.value"
+      }
+    }
+  ],
+  "automation": {
+    "conditions": [],
+    "actions": []
+  }
+}

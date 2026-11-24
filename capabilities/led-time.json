@@ -1,0 +1,35 @@
+{
+  "name": "LED Time",
+  "attributes": {
+    "time": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      },
+      "setter": "setTime",
+      "enumCommands": []
+    }
+  },
+  "commands": {
+    "setTime": {
+      "name": "setTime",
+      "arguments": [
+        {
+          "name": "time",
+          "optional": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          }
+        }
+      ]
+    }
+  }
+}

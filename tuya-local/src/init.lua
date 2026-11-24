@@ -21,6 +21,7 @@ local TIMEOUT = 5             -- seconds for connect and each receive / 연결·
 local PORT = 6668             -- Tuya local TCP port / Tuya 로컬 TCP 포트
 local MAX_PACKETS = 5         -- packets to read while waiting for the status reply / 상태 응답을 기다리며 읽을 최대 패킷 수
 local MAX_PACKET_SIZE = 4096  -- sanity limit / 비정상 패킷 방지
+local ledTime = capabilities["travellaugh21607.ledTime"]
 
 -- Known products: product ID -> profile to use and datapoint numbers.
 -- Temperature value is temperature x 10, humidity is percent.
@@ -33,7 +34,12 @@ local PRODUCTS = {
     humidity = "2",
     display = "21",
     temp_offset = "106",
-    hum_offset = "107"
+    hum_offset = "107",
+    schedule = "101",
+    hour_on = "102",
+    minute_on = "103",
+    hour_off = "104",
+    minute_off = "105"
   },     -- thermo-hygrometer / 온습도계
   ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
   ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
@@ -186,6 +192,39 @@ local function switch_event(is_on)
   return capabilities.switch.switch.off()
 end
 
+-- Convert hour and minute to HH:MM
+-- 시와 분을 HH:MM 형식으로 변환
+local function format_time(hour, minute)
+  if type(hour) ~= "number"
+      or type(minute) ~= "number" then
+    return nil
+  end
+
+  if hour < 0 or hour > 23
+      or minute < 0 or minute > 59
+      or hour % 1 ~= 0 or minute % 1 ~= 0 then
+    return nil
+  end
+
+  return string.format("%02d:%02d", hour, minute)
+end
+
+-- Convert HH:MM to hour and minute
+-- HH:MM 형식을 시와 분으로 변환
+local function parse_time(value)
+  if type(value) ~= "string" then return nil end
+
+  local hour, minute = value:match("^(%d%d):(%d%d)$")
+
+  hour = tonumber(hour)
+  minute = tonumber(minute)
+
+  if not hour or not minute then return nil end
+  if hour > 23 or minute > 59 then return nil end
+
+  return hour, minute
+end
+
 local function apply_thermo_hygro(device, product, dps)
   local temp, hum = dps[product.temperature], dps[product.humidity]
 
@@ -210,6 +249,44 @@ local function apply_thermo_hygro(device, product, dps)
       log.info(string.format("%s: display=%s",
         device.device_network_id, tostring(display)))
     end
+  end
+
+  -- LED schedule state / LED 시간 설정 상태
+  if product.schedule then
+    local schedule = dps[product.schedule]
+
+    if type(schedule) == "boolean" then
+      emit_component(device, "ledSchedule",
+        switch_event(schedule))
+    end
+
+    local on_time = format_time(
+      dps[product.hour_on],
+      dps[product.minute_on]
+    )
+
+    local off_time = format_time(
+      dps[product.hour_off],
+      dps[product.minute_off]
+    )
+
+    if on_time then
+      emit_component(device, "ledOnTime",
+        ledTime.time(on_time))
+    end
+
+    if off_time then
+      emit_component(device, "ledOffTime",
+        ledTime.time(off_time))
+    end
+
+    log.info(string.format(
+      "%s: schedule=%s on_time=%s off_time=%s",
+      device.device_network_id,
+      tostring(schedule),
+      tostring(on_time),
+      tostring(off_time)
+    ))
   end
 
   log.info(string.format("%s: temperature=%s humidity=%s",
@@ -395,19 +472,27 @@ local function handle_switch(driver, device, command)
 
   -- Thermo-hygrometer LED control / 온습도계 LED 제어
   if product.kind == "thermo_hygro" then
-    if parent == device and
-      command.component == "display" and
-      product.display then
+    if parent == device then
+      local dp
 
-      log.info(string.format("%s: display -> %s",
-        device.device_network_id, command.command))
+      if command.component == "display" then
+        dp = product.display
+      elseif command.component == "ledSchedule" then
+        dp = product.schedule
+      end
 
-      run_control(parent, { product.display }, is_on, 1)
+      if dp then
+        log.info(string.format("%s: %s -> %s",
+          device.device_network_id,
+          command.component,
+          command.command))
+
+        run_control(parent, { dp }, is_on, 1)
+      end
     end
 
     return
   end
-
   if product.kind ~= "power_strip" then return end
 
   local targets = {}
@@ -431,6 +516,49 @@ local function handle_switch(driver, device, command)
   end
   log.info(string.format("%s: %s -> %s", device.device_network_id, table.concat(targets, ","), command.command))
   run_control(parent, targets, is_on, 1)
+end
+
+-- Set LED schedule time / LED 자동 켜기·끄기 시간 변경
+local function handle_led_time(driver, device, command)
+  local p = device.preferences or {}
+  local product = PRODUCTS[p.productId]
+
+  if not product or not product.schedule then
+    return
+  end
+
+  local value = (command.named_args or {}).time
+    or (command.args or {}).time
+    or (command.args or {})[1]
+
+  local hour, minute = parse_time(value)
+
+  if hour == nil or minute == nil then
+    log.warn(device.device_network_id ..
+      ": invalid LED time (use HH:MM)")
+    return
+  end
+
+  local dps = {}
+
+  if command.component == "ledOnTime" then
+    dps[product.hour_on] = hour
+    dps[product.minute_on] = minute
+
+  elseif command.component == "ledOffTime" then
+    dps[product.hour_off] = hour
+    dps[product.minute_off] = minute
+
+  else
+    return
+  end
+
+  log.info(string.format("%s: %s -> %s",
+    device.device_network_id,
+    command.component,
+    value))
+
+  run_dps_control(device, dps, 1)
 end
 
 local function handle_refresh(driver, device, command)
@@ -536,6 +664,9 @@ local driver = Driver("tuya-local", {
     },
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = handle_refresh,
+    },
+    [ledTime.ID] = {
+      [ledTime.commands.setTime.NAME] = handle_led_time,
     },
   },
 })

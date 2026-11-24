@@ -14,6 +14,21 @@ components:
     capabilities:
       - id: switch
         version: 1
+  - id: ledSchedule
+    label: LED Schedule
+    capabilities:
+      - id: switch
+        version: 1
+  - id: ledOnTime
+    label: LED On Time
+    capabilities:
+      - id: travellaugh21607.ledTime
+        version: 1
+  - id: ledOffTime
+    label: LED Off Time
+    capabilities:
+      - id: travellaugh21607.ledTime
+        version: 1
 
 deviceConfig:
   dashboard:
@@ -59,6 +74,23 @@ deviceConfig:
                   type: inactive
         - op: remove
           path: /0/standbyPowerSwitch
+    - component: ledSchedule
+      capability: switch
+      version: 1
+    - component: ledOnTime
+      capability: travellaugh21607.ledTime
+      version: 1
+      patch:
+        - op: replace
+          path: /0/label
+          value: "LED On Time"
+    - component: ledOffTime
+      capability: travellaugh21607.ledTime
+      version: 1
+      patch:
+        - op: replace
+          path: /0/label
+          value: "LED Off Time"
   automation:
     conditions:
       - component: main
@@ -70,11 +102,17 @@ deviceConfig:
       - component: display
         capability: switch
         version: 1
+      - component: ledSchedule
+        capability: switch
+        version: 1
     actions:
       - component: main
         capability: refresh
         version: 1
       - component: display
+        capability: switch
+        version: 1
+      - component: ledSchedule
         capability: switch
         version: 1
 preferences:
