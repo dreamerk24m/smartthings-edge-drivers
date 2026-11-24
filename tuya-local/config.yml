@@ -1,6 +1,7 @@
 name: Tuya Local
 packageKey: tuya-local
 description: Local (LAN) control of Tuya Wi-Fi devices using protocol 3.3
+vendorSupportInformation: "https://github.com/dreamerk24m/smartthings-edge-drivers"
 permissions:
   discovery: {}
   lan: {}
