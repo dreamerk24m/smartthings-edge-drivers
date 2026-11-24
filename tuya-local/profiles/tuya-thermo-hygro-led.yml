@@ -20,12 +20,12 @@ components:
       - id: switch
         version: 1
   - id: ledOnTime
-    label: LED On Time
+    label: "LED On Time (00:00 - 23:59)"
     capabilities:
       - id: travellaugh21607.ledTime
         version: 1
   - id: ledOffTime
-    label: LED Off Time
+    label: "LED Off Time (00:00 - 23:59)"
     capabilities:
       - id: travellaugh21607.ledTime
         version: 1
@@ -50,30 +50,6 @@ deviceConfig:
     - component: display
       capability: switch
       version: 1
-      patch:
-        - op: replace
-          path: /0/displayType
-          value: toggleSwitch
-        - op: add
-          path: /0/toggleSwitch
-          value:
-            command:
-              "on": "on"
-              "off": "off"
-            state:
-              value: switch.value
-              "on": "on"
-              "off": "off"
-              label: "{{switch.value}}"
-              alternatives:
-                - key: "on"
-                  value: "On"
-                  type: active
-                - key: "off"
-                  value: "Off"
-                  type: inactive
-        - op: remove
-          path: /0/standbyPowerSwitch
     - component: ledSchedule
       capability: switch
       version: 1
@@ -83,14 +59,14 @@ deviceConfig:
       patch:
         - op: replace
           path: /0/label
-          value: "LED On Time"
+          value: "LED On Time (00:00 - 23:59)"
     - component: ledOffTime
       capability: travellaugh21607.ledTime
       version: 1
       patch:
         - op: replace
           path: /0/label
-          value: "LED Off Time"
+          value: "LED Off Time (00:00 - 23:59)"
   automation:
     conditions:
       - component: main
@@ -115,6 +91,7 @@ deviceConfig:
       - component: ledSchedule
         capability: switch
         version: 1
+
 preferences:
   - name: deviceIp
     title: "Device IP"
