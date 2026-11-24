@@ -31,7 +31,9 @@ local PRODUCTS = {
     profile = "tuya-thermo-hygro-led",
     temperature = "1",
     humidity = "2",
-    display = "21"
+    display = "21",
+    temp_offset = "106",
+    hum_offset = "107"
   },     -- thermo-hygrometer / 온습도계
   ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
   ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
@@ -338,23 +340,25 @@ end
 -- Send the control command. If a poll is running, wait a moment and try again.
 -- Afterwards read the real state right away.
 -- 제어 명령을 보냄. 조회 중이면 잠시 뒤 다시 시도하고, 끝나면 실제 상태를 바로 읽음.
-local function run_control(parent, targets, is_on, attempt)
+local function run_dps_control(parent, dps, attempt)
   if parent:get_field("polling") then
     if attempt < 5 then
-      parent.thread:call_with_delay(1, function() run_control(parent, targets, is_on, attempt + 1) end)
+      parent.thread:call_with_delay(1, function()
+        run_dps_control(parent, dps, attempt + 1)
+      end)
     else
       log.warn(parent.device_network_id .. ": control skipped, device is busy")
     end
     return
   end
+
   local p = parent.preferences
   if not is_configured(p) then return end
 
-  local dps = {}
-  for _, dp in ipairs(targets) do dps[dp] = is_on end
-
   parent:set_field("polling", true)
-  local ok, result, err = pcall(send_control, p.deviceIp, p.deviceId, p.localKey, dps)
+  local ok, result, err = pcall(
+    send_control, p.deviceIp, p.deviceId, p.localKey, dps
+  )
   parent:set_field("polling", false)
 
   if not ok then
@@ -362,7 +366,20 @@ local function run_control(parent, targets, is_on, attempt)
   elseif not result then
     log.warn(parent.device_network_id .. ": control failed: " .. tostring(err))
   end
-  parent.thread:call_with_delay(0.2, function() poll(parent) end)
+
+  parent.thread:call_with_delay(0.2, function()
+    poll(parent)
+  end)
+end
+
+local function run_control(parent, targets, is_on, attempt)
+  local dps = {}
+
+  for _, dp in ipairs(targets) do
+    dps[dp] = is_on
+  end
+
+  run_dps_control(parent, dps, attempt)
 end
 
 -- Switch on/off from the main switch, an outlet component, or a child device.
@@ -446,10 +463,57 @@ end
 
 -- Never log the local key itself, only its length.
 -- Local Key는 로그에 남기지 않고 글자 수만 남김.
-local function info_changed(driver, device, _, _)
+local function info_changed(driver, device, event, args)
   local p = device.preferences or {}
-  log.info(string.format("%s: settings changed ip=%s id=%s product=%s key_len=%d",
-    device.device_network_id, tostring(p.deviceIp), tostring(p.deviceId), tostring(p.productId), #(p.localKey or "")))
+
+  log.info(string.format(
+    "%s: settings changed ip=%s id=%s product=%s key_len=%d",
+    device.device_network_id,
+    tostring(p.deviceIp),
+    tostring(p.deviceId),
+    tostring(p.productId),
+    #(p.localKey or "")
+  ))
+
+  local old = (args and args.old_st_store
+    and args.old_st_store.preferences) or {}
+
+  local product = PRODUCTS[p.productId]
+
+  if product and is_configured(p)
+      and old.productId == p.productId then
+    local dps = {}
+
+    -- Temperature compensation / 온도 보정
+    if product.temp_offset
+        and type(p.tempOffset) == "number"
+        and old.tempOffset ~= nil
+        and old.tempOffset ~= p.tempOffset then
+
+      local value = math.floor(p.tempOffset * 10 + 0.5)
+      dps[product.temp_offset] = value
+
+      log.info(string.format("%s: temperature offset=%s",
+        device.device_network_id, tostring(p.tempOffset)))
+    end
+
+    -- Humidity compensation / 습도 보정
+    if product.hum_offset
+        and type(p.humOffset) == "number"
+        and old.humOffset ~= nil
+        and old.humOffset ~= p.humOffset then
+
+      dps[product.hum_offset] = p.humOffset
+
+      log.info(string.format("%s: humidity offset=%s",
+        device.device_network_id, tostring(p.humOffset)))
+    end
+
+    if next(dps) then
+      run_dps_control(device, dps, 1)
+    end
+  end
+
   start_polling(driver, device)
 end
 
