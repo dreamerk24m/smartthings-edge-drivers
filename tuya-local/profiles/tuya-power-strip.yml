@@ -1,0 +1,67 @@
+name: tuya-power-strip
+components:
+  - id: main
+    capabilities:
+      - id: switch
+        version: 1
+      - id: powerMeter
+        version: 1
+    categories:
+      - name: SmartPlug
+  - id: outlet1
+    capabilities:
+      - id: switch
+        version: 1
+  - id: outlet2
+    capabilities:
+      - id: switch
+        version: 1
+  - id: outlet3
+    capabilities:
+      - id: switch
+        version: 1
+  - id: outlet4
+    capabilities:
+      - id: switch
+        version: 1
+preferences:
+  - name: deviceIp
+    title: "Device IP"
+    description: "Local IP address of the device"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "0.0.0.0"
+  - name: deviceId
+    title: "Device ID"
+    description: "Tuya device ID (20 or 22 characters)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 20
+      maxLength: 22
+      default: "00000000000000000000"
+  - name: localKey
+    title: "Local Key"
+    description: "Tuya local key (16 characters)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 16
+      maxLength: 16
+      default: "0000000000000000"
+  - name: productId
+    title: "Product ID"
+    description: "Tuya product ID (16 characters)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 16
+      maxLength: 16
+      default: "0000000000000000"

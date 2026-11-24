@@ -26,10 +26,12 @@ local MAX_PACKET_SIZE = 4096  -- sanity limit / 비정상 패킷 방지
 -- Temperature value is temperature x 10, humidity is percent.
 -- 알려진 제품: 제품 ID -> 사용할 프로필과 DP 번호. 온도 값은 온도 x 10, 습도는 %.
 local PRODUCTS = {
-  ["o2c5btmpepi9pzf8"] = { profile = "tuya-thermo-hygro", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
-  ["whs3cty93fzrqkpt"] = { profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
+  ["o2c5btmpepi9pzf8"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "1", humidity = "2" },     -- thermo-hygrometer / 온습도계
+  ["whs3cty93fzrqkpt"] = { kind = "thermo_hygro", profile = "tuya-thermo-hygro", temperature = "101", humidity = "102" }, -- thermo-hygrometer with IR / IR 블래스터 온습도
+  ["7hBwPPNdDP1xHrWv"] = { kind = "power_strip", profile = "tuya-power-strip", outlets = { "1", "2", "3", "4" }, power = "103", power_scale = 10 }, -- power strip / 멀티탭
 }
 
+local OUTLET_PROFILE = "tuya-power-strip-outlet"
 local seq = 0
 
 ---------------------------------------------------------------------------
@@ -129,6 +131,66 @@ local function emit(device, event)
   if not ok then log.warn(device.device_network_id .. ": could not emit event: " .. tostring(err)) end
 end
 
+-- Emit an event to one component of a device (e.g. "outlet1").
+-- 기기의 특정 component(예: "outlet1")에 이벤트를 보냄.
+local function emit_component(device, component_id, event)
+  local component = device.profile.components[component_id]
+  if not component then
+    log.warn(device.device_network_id .. ": no component " .. component_id)
+    return
+  end
+  local ok, err = pcall(device.emit_component_event, device, component, event)
+  if not ok then log.warn(device.device_network_id .. ": could not emit event to " .. component_id .. ": " .. tostring(err)) end
+end
+
+local function switch_event(is_on)
+  if is_on then return capabilities.switch.switch.on() end
+  return capabilities.switch.switch.off()
+end
+
+local function apply_thermo_hygro(device, product, dps)
+  local temp, hum = dps[product.temperature], dps[product.humidity]
+  if type(temp) == "number" then
+    emit(device, capabilities.temperatureMeasurement.temperature({ value = temp / 10, unit = "C" }))
+  end
+  if type(hum) == "number" then
+    emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
+  end
+  log.info(string.format("%s: temperature=%s humidity=%s",
+    device.device_network_id, tostring(type(temp) == "number" and temp / 10 or nil), tostring(hum)))
+end
+
+-- Outlet states go to the child devices and to the outlet components of this device.
+-- The main switch is on when at least one outlet is on. Power is DP value / power_scale (W).
+-- 콘센트 상태는 자식 기기와 이 기기의 outlet component에 보냄. 메인 스위치는 하나라도 켜져 있으면 on.
+local function apply_power_strip(device, product, dps)
+  local seen, any_on = false, false
+  for i, dp in ipairs(product.outlets) do
+    local value = dps[dp]
+    if type(value) == "boolean" then
+      seen = true
+      if value then any_on = true end
+      local child = device:get_child_by_parent_assigned_key(dp)
+      if child then emit(child, switch_event(value)) end
+      emit_component(device, "outlet" .. i, switch_event(value))
+    end
+  end
+  if seen then emit(device, switch_event(any_on)) end
+
+  local power = dps[product.power]
+  if type(power) == "number" then
+    emit(device, capabilities.powerMeter.power({ value = power / product.power_scale, unit = "W" }))
+  end
+  log.info(string.format("%s: any_on=%s power=%s",
+    device.device_network_id, tostring(seen and any_on or nil),
+    tostring(type(power) == "number" and power / product.power_scale or nil)))
+end
+
+local APPLY = {
+  thermo_hygro = apply_thermo_hygro,
+  power_strip = apply_power_strip,
+}
+
 local function poll(device)
   if device:get_field("polling") then return end
   local p = device.preferences
@@ -149,15 +211,8 @@ local function poll(device)
     return
   end
 
-  local temp, hum = dps[product.temperature], dps[product.humidity]
-  if type(temp) == "number" then
-    emit(device, capabilities.temperatureMeasurement.temperature({ value = temp / 10, unit = "C" }))
-  end
-  if type(hum) == "number" then
-    emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
-  end
-  log.info(string.format("%s: temperature=%s humidity=%s",
-    device.device_network_id, tostring(type(temp) == "number" and temp / 10 or nil), tostring(hum)))
+  local apply = APPLY[product.kind]
+  if apply then apply(device, product, dps) end
 end
 
 local function stop_polling(device)
@@ -168,11 +223,34 @@ local function stop_polling(device)
   end
 end
 
+
+-- Create one child device per outlet, only once. The child key is the DP number ("1".."4").
+-- 콘센트마다 자식 기기를 한 번만 만듦. 자식 키는 DP 번호("1"~"4").
+local function create_children(driver, device, product)
+  if device:get_field("children_created") then return end
+  device:set_field("children_created", true, { persist = true })
+  for i, dp in ipairs(product.outlets) do
+    if not device:get_child_by_parent_assigned_key(dp) then
+      local ok, err = driver:try_create_device({
+        type = "EDGE_CHILD",
+        label = "콘센트 " .. i,
+        profile = OUTLET_PROFILE,
+        manufacturer = "Tuya",
+        parent_device_id = device.id,
+        parent_assigned_child_key = dp,
+      })
+      log.info(string.format("%s: create child %s -> %s %s",
+        device.device_network_id, dp, tostring(ok), tostring(err)))
+    end
+  end
+end
+
 -- (Re)start the poll timer, and poll once right away. Does nothing until settings are filled in.
 -- 조회 타이머를 (다시) 걸고 바로 한 번 조회함. 설정이 채워지기 전에는 아무것도 안 함.
-local function start_polling(device)
+
+local function start_polling(driver, device)
   stop_polling(device)
-  local p = device.preferences
+  local p = device.preferences or {}
   if not is_configured(p) then
     log.info(device.device_network_id .. ": settings not complete yet, not polling")
     return
@@ -188,6 +266,9 @@ local function start_polling(device)
     device:set_field("applied_profile", product.profile, { persist = true })
     log.info(device.device_network_id .. ": switching profile to " .. product.profile)
     device:try_update_metadata({ profile = product.profile })
+  end
+  if product.kind == "power_strip" then
+    create_children(driver, device, product)
   end
   local timer = device.thread:call_on_schedule(POLL_INTERVAL, function() poll(device) end, "tuya-poll")
   device:set_field("poll_timer", timer)
@@ -213,22 +294,18 @@ local function discovery_handler(driver, _, _)
   })
 end
 
-local function device_added(_, device)
-  log.info(device.device_network_id .. ": added")
-end
-
-local function device_init(_, device)
+local function device_init(driver, device)
   log.info(device.device_network_id .. ": init")
-  start_polling(device)
+  start_polling(driver, device)
 end
 
 -- Never log the local key itself, only its length.
 -- Local Key는 로그에 남기지 않고 글자 수만 남김.
-local function info_changed(_, device, _, _)
-  local p = device.preferences
+local function info_changed(driver, device, _, _)
+  local p = device.preferences or {}
   log.info(string.format("%s: settings changed ip=%s id=%s product=%s key_len=%d",
     device.device_network_id, tostring(p.deviceIp), tostring(p.deviceId), tostring(p.productId), #(p.localKey or "")))
-  start_polling(device)
+  start_polling(driver, device)
 end
 
 local function device_removed(_, device)
