@@ -120,6 +120,36 @@ local function query_status(ip, dev_id, key)
   return nil, last_err
 end
 
+-- Send a control command. Returns true, or nil + error. The result is checked by polling afterwards.
+-- 제어 명령을 보냄. 결과는 이후 조회로 확인함.
+local function send_control(ip, dev_id, key, dps)
+  local tcp = socket.tcp()
+  tcp:settimeout(TIMEOUT)
+
+  local ok, err = tcp:connect(ip, PORT)
+  if not ok then
+    tcp:close()
+    return nil, "connect failed: " .. tostring(err)
+  end
+
+  seq = seq + 1
+  local sent, serr = tcp:send(tuya.build_control(dev_id, key, seq, tostring(os.time()), dps))
+  if not sent then
+    tcp:close()
+    return nil, "send failed: " .. tostring(serr)
+  end
+
+  -- Read one reply only to see what the device answers (for debugging).
+  -- 기기의 응답을 로그로 확인하려고 하나만 읽음.
+  local packet = read_packet(tcp)
+  if packet then
+    log.info(string.format("control reply: cmd=%d size=%d", string.unpack(">I4", packet, 9), #packet))
+  end
+
+  tcp:close()
+  return true
+end
+
 ---------------------------------------------------------------------------
 -- Polling / 주기 조회
 ---------------------------------------------------------------------------
@@ -276,6 +306,73 @@ local function start_polling(driver, device)
 end
 
 ---------------------------------------------------------------------------
+-- Commands / 명령 처리
+---------------------------------------------------------------------------
+
+-- Send the control command. If a poll is running, wait a moment and try again.
+-- Afterwards read the real state right away.
+-- 제어 명령을 보냄. 조회 중이면 잠시 뒤 다시 시도하고, 끝나면 실제 상태를 바로 읽음.
+local function run_control(parent, targets, is_on, attempt)
+  if parent:get_field("polling") then
+    if attempt < 5 then
+      parent.thread:call_with_delay(1, function() run_control(parent, targets, is_on, attempt + 1) end)
+    else
+      log.warn(parent.device_network_id .. ": control skipped, device is busy")
+    end
+    return
+  end
+  local p = parent.preferences
+  if not is_configured(p) then return end
+
+  local dps = {}
+  for _, dp in ipairs(targets) do dps[dp] = is_on end
+
+  parent:set_field("polling", true)
+  local ok, result, err = pcall(send_control, p.deviceIp, p.deviceId, p.localKey, dps)
+  parent:set_field("polling", false)
+
+  if not ok then
+    log.warn(parent.device_network_id .. ": control error: " .. tostring(result))
+  elseif not result then
+    log.warn(parent.device_network_id .. ": control failed: " .. tostring(err))
+  end
+  parent.thread:call_with_delay(0.2, function() poll(parent) end)
+end
+
+-- Switch on/off from the main switch, an outlet component, or a child device.
+-- 메인 스위치, outlet component, 자식 기기 어디서 눌러도 여기로 옴.
+local function handle_switch(driver, device, command)
+  local is_on = command.command == "on"
+  local found, parent_device = pcall(device.get_parent_device, device)
+  local parent = (found and parent_device) or device
+
+  local product = PRODUCTS[(parent.preferences or {}).productId]
+  if not product or product.kind ~= "power_strip" then return end
+
+  local targets = {}
+  if parent == device then
+    if command.component == "main" then
+      for _, dp in ipairs(product.outlets) do targets[#targets + 1] = dp end
+    else
+      local index = tonumber(string.match(command.component, "^outlet(%d+)$"))
+      if index and product.outlets[index] then targets[1] = product.outlets[index] end
+    end
+  else
+    for _, dp in ipairs(product.outlets) do
+      local child = parent:get_child_by_parent_assigned_key(dp)
+      if child and child.id == device.id then targets[1] = dp end
+    end
+  end
+
+  if #targets == 0 then
+    log.warn(device.device_network_id .. ": no target for " .. tostring(command.component))
+    return
+  end
+  log.info(string.format("%s: %s -> %s", device.device_network_id, table.concat(targets, ","), command.command))
+  run_control(parent, targets, is_on, 1)
+end
+
+---------------------------------------------------------------------------
 -- Lifecycle / 기기 생명주기
 ---------------------------------------------------------------------------
 
@@ -320,6 +417,12 @@ local driver = Driver("tuya-local", {
     init = device_init,
     infoChanged = info_changed,
     removed = device_removed,
+  },
+  capability_handlers = {
+    [capabilities.switch.ID] = {
+      [capabilities.switch.commands.on.NAME] = handle_switch,
+      [capabilities.switch.commands.off.NAME] = handle_switch,
+    },
   },
 })
 

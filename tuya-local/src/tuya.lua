@@ -13,9 +13,12 @@ local CMD_DP_QUERY = 0x0A
 local PREFIX = "\x00\x00\x55\xAA"
 local SUFFIX = "\x00\x00\xAA\x55"
 local HEADER_LEN = 16
+local CMD_CONTROL = 0x07
+local PROTOCOL_33_HEADER = "3.3" .. string.rep("\0", 12)
 
 tuya.CMD_DP_QUERY = CMD_DP_QUERY
 tuya.HEADER_LEN = HEADER_LEN
+tuya.CMD_CONTROL = CMD_CONTROL
 
 -- CRC32 (same polynomial as zlib).
 local crc_table = {}
@@ -43,6 +46,22 @@ function tuya.build_status_query(dev_id, local_key, seq, t)
   local json = string.format('{"gwId":"%s","devId":"%s","uid":"%s","t":"%s"}', dev_id, dev_id, dev_id, t)
   local payload = aes.encrypt_ecb(aes.pad(json), local_key)
   local head = PREFIX .. string.pack(">I4I4I4", seq, CMD_DP_QUERY, #payload + 8) .. payload
+  return head .. string.pack(">I4", crc32(head)) .. SUFFIX
+end
+
+-- Build a CONTROL (set datapoints) packet. `dps` is a table such as { ["1"] = true }.
+-- In protocol 3.3 the encrypted payload of a control command is prefixed with a version header.
+-- DP를 바꾸는 제어 패킷을 만듦. 3.3에서는 암호화한 데이터 앞에 버전 헤더가 붙음.
+function tuya.build_control(dev_id, local_key, seq, t, dps)
+  local parts = {}
+  for k, v in pairs(dps) do
+    parts[#parts + 1] = string.format('"%s":%s', k, tostring(v))
+  end
+  table.sort(parts)
+  local json = string.format('{"devId":"%s","uid":"%s","t":"%s","dps":{%s}}',
+    dev_id, dev_id, t, table.concat(parts, ","))
+  local payload = PROTOCOL_33_HEADER .. aes.encrypt_ecb(aes.pad(json), local_key)
+  local head = PREFIX .. string.pack(">I4I4I4", seq, CMD_CONTROL, #payload + 8) .. payload
   return head .. string.pack(">I4", crc32(head)) .. SUFFIX
 end
 
