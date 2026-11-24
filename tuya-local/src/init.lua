@@ -413,7 +413,6 @@ end
 local driver = Driver("tuya-local", {
   discovery = discovery_handler,
   lifecycle_handlers = {
-    added = device_added,
     init = device_init,
     infoChanged = info_changed,
     removed = device_removed,
