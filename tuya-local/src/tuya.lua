@@ -6,6 +6,7 @@
 --   length = len(payload) + 8. Replies carry a 4-byte return code at the start of the payload.
 
 local aes = require "aes"
+local json = require "st.json"
 
 local tuya = {}
 
@@ -49,19 +50,23 @@ function tuya.build_status_query(dev_id, local_key, seq, t)
   return head .. string.pack(">I4", crc32(head)) .. SUFFIX
 end
 
--- Build a CONTROL (set datapoints) packet. `dps` is a table such as { ["1"] = true }.
--- In protocol 3.3 the encrypted payload of a control command is prefixed with a version header.
--- DP를 바꾸는 제어 패킷을 만듦. 3.3에서는 암호화한 데이터 앞에 버전 헤더가 붙음.
+-- Build a CONTROL packet.
+-- DP 제어 패킷을 만듦. 숫자, 불리언, 문자열 등을 지원함.
 function tuya.build_control(dev_id, local_key, seq, t, dps)
-  local parts = {}
-  for k, v in pairs(dps) do
-    parts[#parts + 1] = string.format('"%s":%s', k, tostring(v))
-  end
-  table.sort(parts)
-  local json = string.format('{"devId":"%s","uid":"%s","t":"%s","dps":{%s}}',
-    dev_id, dev_id, t, table.concat(parts, ","))
-  local payload = PROTOCOL_33_HEADER .. aes.encrypt_ecb(aes.pad(json), local_key)
-  local head = PREFIX .. string.pack(">I4I4I4", seq, CMD_CONTROL, #payload + 8) .. payload
+  local data = json.encode({
+    devId = dev_id,
+    uid = dev_id,
+    t = t,
+    dps = dps
+  })
+
+  local payload = PROTOCOL_33_HEADER ..
+    aes.encrypt_ecb(aes.pad(data), local_key)
+
+  local head = PREFIX ..
+    string.pack(">I4I4I4", seq, CMD_CONTROL, #payload + 8) ..
+    payload
+
   return head .. string.pack(">I4", crc32(head)) .. SUFFIX
 end
 
