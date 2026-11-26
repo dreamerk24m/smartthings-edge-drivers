@@ -123,7 +123,7 @@ local function handle_switch(device, parent, product, command, is_on, run_contro
           device.device_network_id,
           command.component,
           command.command))
-      run_control(parent, { dp }, is_on, 1)
+      run_control(parent, { dp }, is_on)
     end
   end
 end
@@ -157,7 +157,7 @@ local function handle_led_time(device, product, command, run_dps_control)
       device.device_network_id,
       command.component,
       value))
-  run_dps_control(device, dps, 1)
+  run_dps_control(device, dps)
 end
 
 -- Device-side compensation / 기기 자체 온습도 보정
@@ -185,7 +185,7 @@ local function info_changed(device, product, p, old, run_dps_control)
   end
 
   if next(dps) then
-    run_dps_control(device, dps, 1)
+    run_dps_control(device, dps)
   end
 end
 

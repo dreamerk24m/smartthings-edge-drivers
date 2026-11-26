@@ -193,7 +193,7 @@ function M.send(device, product, run_dps_control)
 
   log.info("IR: sending learned code")
 
-  run_dps_control(device, dps, 1)
+  run_dps_control(device, dps)
 end
 
 return M

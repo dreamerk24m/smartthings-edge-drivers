@@ -1,6 +1,6 @@
 -- Tuya Local (LAN) driver for SmartThings Edge
--- Discovery, device lifecycle, polling and command dispatch.
--- 기기 검색, 생명주기, 주기 조회 및 명령 분배.
+-- Discovery, device lifecycle, persistent connections and command dispatch.
+-- 기기 검색, 생명주기, 지속 연결 및 명령 분배.
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local log = require "log"
@@ -18,11 +18,8 @@ local handlers = {
   ir_blaster = require "devices.ir_blaster",
 }
 
-local query_status = transport.query_status
-local send_control = transport.send_control
 -- Profile used until the product ID is known / 제품 ID를 알기 전까지 쓰는 초기 프로필
 local SETUP_PROFILE = "tuya-setup"
-local POLL_INTERVAL = 60      -- seconds between polls / 조회 간격(초)
 
 ---------------------------------------------------------------------------
 -- Settings check / 설정 확인
@@ -47,14 +44,6 @@ end
 
 local RECONNECT_INTERVAL = 10
 local INITIAL_QUERY_TIMEOUT = 5
-
-local function uses_push(product)
-  return product and (
-    product.kind == "thermo_hygro_led"
-    or product.kind == "power_strip"
-    or product.kind == "ir_blaster"
-  )
-end
 
 local start_push
 
@@ -92,7 +81,7 @@ local function schedule_reconnect(device)
   local p = device.preferences or {}
   local product = PRODUCTS[p.productId]
 
-  if not is_configured(p) or not uses_push(product) then
+  if not is_configured(p) or not product then
     return
   end
 
@@ -117,7 +106,7 @@ local function schedule_reconnect(device)
       local current_product = PRODUCTS[prefs.productId]
 
       if not is_configured(prefs)
-        or not uses_push(current_product) then
+        or not current_product then
         return
       end
 
@@ -138,9 +127,9 @@ local function schedule_reconnect(device)
     device:set_field("reconnect_timer", timer)
 
     log.info(string.format(
-      "%s: reconnect scheduled in %d seconds",
-      device.device_network_id,
-      RECONNECT_INTERVAL
+        "%s: reconnect scheduled in %d seconds",
+        device.device_network_id,
+        RECONNECT_INTERVAL
     ))
   else
     log.warn(device.device_network_id ..
@@ -157,8 +146,8 @@ local function handle_session_packet(device, product,
 
   if retcode ~= 0 then
     log.warn(string.format(
-      "%s: command=%d error=%d",
-      device.device_network_id, cmd, retcode
+        "%s: command=%d error=%d",
+        device.device_network_id, cmd, retcode
     ))
     return
   end
@@ -200,9 +189,9 @@ local function handle_session_packet(device, product,
   end
 
   log.debug(string.format(
-    "%s: %s received",
-    device.device_network_id,
-    cmd == tuya.CMD_DP_QUERY and "status reply" or "DP push"
+      "%s: %s received",
+      device.device_network_id,
+      cmd == tuya.CMD_DP_QUERY and "status reply" or "DP push"
   ))
 
   local handler = handlers[product.kind]
@@ -222,7 +211,7 @@ start_push = function(device, product)
   local p = device.preferences or {}
   local current = device:get_field("tuya_session")
 
-  if not is_configured(p) or not uses_push(product) then
+  if not is_configured(p) or not product then
     stop_push(device)
     return
   end
@@ -266,7 +255,7 @@ start_push = function(device, product)
 
   if not session then
     log.warn(device.device_network_id ..
-      ": connection failed: " .. tostring(err))
+        ": connection failed: " .. tostring(err))
 
     schedule_reconnect(device)
     return
@@ -282,7 +271,7 @@ start_push = function(device, product)
 
   if not ok then
     log.warn(device.device_network_id ..
-      ": initial query failed: " .. tostring(query_err))
+        ": initial query failed: " .. tostring(query_err))
 
     if not session.closed then
       transport.close_session(session, "initial query failed")
@@ -326,45 +315,13 @@ start_push = function(device, product)
 end
 
 ---------------------------------------------------------------------------
--- Polling / 주기 조회
+-- Device configuration / 기기 설정
 ---------------------------------------------------------------------------
 
-local function poll(device)
-  if device:get_field("polling") then return end
-  local p = device.preferences
-  if not is_configured(p) then return end
-  local product = PRODUCTS[p.productId]
-  if not product then return end
-  if uses_push(product) then return end
-  device:set_field("polling", true)
-  local ok, dps, err = pcall(query_status, p.deviceIp, p.deviceId, p.localKey)
-  device:set_field("polling", false)
-  if not ok then
-    log.warn(device.device_network_id .. ": poll error: " .. tostring(dps))
-    return
-  end
-  if not dps then
-    log.warn(device.device_network_id .. ": poll failed: " .. tostring(err))
-    return
-  end
-  local handler = handlers[product.kind]
-  if handler and handler.apply then handler.apply(device, product, dps) end
-end
+-- Configure the device and establish a persistent connection.
+-- 기기를 설정하고 지속 연결을 시작함.
 
-local function stop_polling(device)
-  local timer = device:get_field("poll_timer")
-  if timer then
-    device.thread:cancel_timer(timer)
-    device:set_field("poll_timer", nil)
-  end
-end
-
--- (Re)start the poll timer, and poll once right away. Does nothing until settings are filled in.
--- 조회 타이머를 (다시) 걸고 바로 한 번 조회함. 설정이 채워지기 전에는 아무것도 안 함.
-
-local function start_polling(driver, device)
-  stop_polling(device)
-
+local function configure_device(driver, device)
   local p = device.preferences or {}
 
   if not is_configured(p) then
@@ -379,7 +336,7 @@ local function start_polling(driver, device)
   if not product then
     stop_push(device)
     log.warn(device.device_network_id ..
-      ": unknown product ID " .. tostring(p.productId))
+        ": unknown product ID " .. tostring(p.productId))
     return
   end
 
@@ -388,10 +345,10 @@ local function start_polling(driver, device)
       product.profile, { persist = true })
 
     log.info(device.device_network_id ..
-      ": switching profile to " .. product.profile)
+        ": switching profile to " .. product.profile)
 
     device:try_update_metadata({
-      profile = product.profile
+        profile = product.profile
     })
   end
 
@@ -401,93 +358,49 @@ local function start_polling(driver, device)
     handler.create_children(driver, device, product)
   end
 
-  -- Use persistent TCP for supported products.
-  -- 지원 기기는 지속 TCP 연결을 사용함.
-  if uses_push(product) then
-    start_push(device, product)
-    return
-  end
-
-  stop_push(device)
-
-  local timer = device.thread:call_on_schedule(
-    POLL_INTERVAL,
-    function() poll(device) end,
-    "tuya-poll"
-  )
-
-  device:set_field("poll_timer", timer)
-
-  device.thread:call_with_delay(
-    0, function() poll(device) end
-  )
+  start_push(device, product)
 end
 
 ---------------------------------------------------------------------------
 -- Commands / 명령 처리
 ---------------------------------------------------------------------------
--- Send the control command. If a poll is running, wait a moment and try again.
--- Afterwards read the real state right away.
--- 제어 명령을 보냄. 조회 중이면 잠시 뒤 다시 시도하고, 끝나면 실제 상태를 바로 읽음.
+-- Send a control command using the persistent TCP session.
+-- 지속 TCP 연결을 통해 제어 명령을 전송함.
 
-local function run_dps_control(parent, dps, attempt)
+local function run_dps_control(parent, dps)
   local prefs = parent.preferences or {}
   local product = PRODUCTS[prefs.productId]
-  if uses_push(product) then
-    if not is_configured(prefs) then return end
 
-    local session = parent:get_field("tuya_session")
+  if not product or not is_configured(prefs) then
+    return
+  end
 
-    if not session or session.closed then
-      log.warn(parent.device_network_id ..
-        ": control skipped, not connected")
-      return
-    end
+  local session = parent:get_field("tuya_session")
 
-    local ok, err = transport.session_control(session, dps)
+  if not session or session.closed then
+    log.warn(parent.device_network_id ..
+      ": control skipped, not connected")
+    return
+  end
 
-    if ok then
-      log.debug(parent.device_network_id .. ": control TX")
-    else
-      log.warn(parent.device_network_id ..
+  local ok, err = transport.session_control(session, dps)
+
+  if ok then
+    log.debug(parent.device_network_id .. ": control TX")
+  else
+    log.warn(parent.device_network_id ..
         ": control failed: " .. tostring(err))
-    end
-
-    return
   end
-  if parent:get_field("polling") then
-    if attempt < 5 then
-      parent.thread:call_with_delay(1, function()
-          run_dps_control(parent, dps, attempt + 1)
-      end)
-    else
-      log.warn(parent.device_network_id .. ": control skipped, device is busy")
-    end
-    return
-  end
-  local p = parent.preferences
-  if not is_configured(p) then return end
-  parent:set_field("polling", true)
-  local ok, result, err = pcall(
-    send_control, p.deviceIp, p.deviceId, p.localKey, dps
-  )
-  parent:set_field("polling", false)
-  if not ok then
-    log.warn(parent.device_network_id .. ": control error: " .. tostring(result))
-  elseif not result then
-    log.warn(parent.device_network_id .. ": control failed: " .. tostring(err))
-  end
-  parent.thread:call_with_delay(0.2, function()
-      poll(parent)
-  end)
 end
 
-local function run_control(parent, targets, is_on, attempt)
+local function run_control(parent, targets, is_on)
   local dps = {}
+
   for _, dp in ipairs(targets) do
     dps[dp] = is_on
   end
-  run_dps_control(parent, dps, attempt)
+
+  run_dps_control(parent, dps)
 end
 
 -- Switch on/off from the main switch, an outlet component, or a child device.
@@ -501,7 +414,7 @@ local function handle_switch(driver, device, command)
   -- 자식 기기인 경우에만 부모 기기를 조회함.
   if device.network_type == st_device.NETWORK_TYPE_CHILD then
     local found, parent_device =
-      pcall(device.get_parent_device, device)
+    pcall(device.get_parent_device, device)
 
     if not found or not parent_device then
       return
@@ -517,13 +430,13 @@ local function handle_switch(driver, device, command)
   local handler = handlers[product.kind]
 
   if handler and handler.handle_switch then
-    if device ~= parent and uses_push(product) then
+    if device ~= parent then
       -- Execute child commands on the parent device thread.
       -- 자식 기기 명령을 부모 기기 스레드에서 실행함.
       parent.thread:call_with_delay(0, function()
-        handler.handle_switch(
-          device, parent, product, command, is_on, run_control
-        )
+          handler.handle_switch(
+            device, parent, product, command, is_on, run_control
+          )
       end)
     else
       handler.handle_switch(
@@ -567,19 +480,16 @@ local function handle_refresh(driver, device, command)
   if is_configured(p) then
     local product = PRODUCTS[p.productId]
 
-    if uses_push(product) then
-      local session = device:get_field("tuya_session")
+    if not product then return end
 
-      if session and not session.closed then
-        transport.session_query(session)
-      else
-        start_polling(driver, device)
-      end
+    local session = device:get_field("tuya_session")
 
-      return
+    if session and not session.closed then
+      transport.session_query(session)
+    else
+      configure_device(driver, device)
     end
 
-    poll(device)
     return
   end
 
@@ -603,7 +513,7 @@ local function handle_refresh(driver, device, command)
 
   if child and child.id == device.id then
     parent.thread:call_with_delay(0, function()
-      handle_refresh(driver, parent, command)
+        handle_refresh(driver, parent, command)
     end)
   end
 end
@@ -629,7 +539,7 @@ end
 
 local function device_init(driver, device)
   log.info(device.device_network_id .. ": init")
-  start_polling(driver, device)
+  configure_device(driver, device)
 end
 
 -- Never log the local key itself, only its length.
@@ -639,12 +549,12 @@ local function info_changed(driver, device, event, args)
   local p = device.preferences or {}
 
   log.info(string.format(
-    "%s: settings changed ip=%s id=%s product=%s key_len=%d",
-    device.device_network_id,
-    tostring(p.deviceIp),
-    tostring(p.deviceId),
-    tostring(p.productId),
-    #(p.localKey or "")
+      "%s: settings changed ip=%s id=%s product=%s key_len=%d",
+      device.device_network_id,
+      tostring(p.deviceIp),
+      tostring(p.deviceId),
+      tostring(p.productId),
+      #(p.localKey or "")
   ))
 
   local old = (args and args.old_st_store
@@ -652,9 +562,7 @@ local function info_changed(driver, device, event, args)
 
   local product = PRODUCTS[p.productId]
 
-  if uses_push(product) then
-    start_polling(driver, device)
-  end
+  configure_device(driver, device)
 
   if product and is_configured(p)
     and old.productId == p.productId then
@@ -667,15 +575,10 @@ local function info_changed(driver, device, event, args)
       )
     end
   end
-
-  if not uses_push(product) then
-    start_polling(driver, device)
-  end
 end
 
 local function device_removed(_, device)
   log.info(device.device_network_id .. ": removed")
-  stop_polling(device)
   stop_push(device)
 end
 

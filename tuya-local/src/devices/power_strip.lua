@@ -122,7 +122,7 @@ local function handle_switch(device, parent, product, command, is_on, run_contro
     return
   end
   log.info(string.format("%s: %s -> %s", device.device_network_id, table.concat(targets, ","), command.command))
-  run_control(parent, targets, is_on, 1)
+  run_control(parent, targets, is_on)
 end
 
 return {
