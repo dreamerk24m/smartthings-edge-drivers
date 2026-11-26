@@ -133,7 +133,7 @@ preferences:
       minLength: 16
       maxLength: 16
       default: "0000000000000000"
-  - name: tempOffset
+  - name: deviceTempOffset
     title: "Temperature offset"
     description: "Range -8.0 to 8.0 in 0.1 steps"
     required: false
@@ -142,7 +142,7 @@ preferences:
       minimum: -8
       maximum: 8
       default: 0
-  - name: humOffset
+  - name: deviceHumOffset
     title: "Humidity offset"
     description: "Range -10 to 10"
     required: false

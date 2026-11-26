@@ -70,17 +70,43 @@ local function apply_led(device, product, dps)
       emit_component(device, "ledOffTime",
         ledTime.time(off_time))
     end
-    log.info(string.format(
-        "%s: schedule=%s on_time=%s off_time=%s",
-        device.device_network_id,
-        tostring(schedule),
-        tostring(on_time),
-        tostring(off_time)
-    ))
+
+    local values = {}
+
+    if type(schedule) == "boolean" then
+      values[#values + 1] = "schedule=" .. tostring(schedule)
+    end
+
+    if on_time then
+      values[#values + 1] = "on_time=" .. on_time
+    end
+
+    if off_time then
+      values[#values + 1] = "off_time=" .. off_time
+    end
+
+    if #values > 0 then
+      log.info(device.device_network_id .. ": " ..
+        table.concat(values, " "))
+    end
   end
 end
 
-local function apply(device, product, dps)
+local function apply(device, product, dps, cache)
+  if cache then
+    -- Complete related hour/minute DP pairs.
+    -- 서로 연관된 시·분 DP를 캐시에서 보완함.
+    local function fill_time_pair(hour, minute)
+      if dps[hour] ~= nil or dps[minute] ~= nil then
+        dps[hour] = cache[hour]
+        dps[minute] = cache[minute]
+      end
+    end
+
+    fill_time_pair(product.hour_on, product.minute_on)
+    fill_time_pair(product.hour_off, product.minute_off)
+  end
+
   thermo_hygro.apply(device, product, dps, apply_led)
 end
 
@@ -141,24 +167,23 @@ local function info_changed(device, product, p, old, run_dps_control)
 
   -- Temperature compensation / 온도 보정
   if product.temp_offset
-    and type(p.tempOffset) == "number"
-    and old.tempOffset ~= nil
-    and old.tempOffset ~= p.tempOffset then
-    local value = math.floor(p.tempOffset * 10 + 0.5)
+    and type(p.deviceTempOffset) == "number"
+    and old.deviceTempOffset ~= p.deviceTempOffset then
+    local value = math.floor(p.deviceTempOffset * 10 + 0.5)
     dps[product.temp_offset] = value
     log.info(string.format("%s: temperature offset=%s",
-        device.device_network_id, tostring(p.tempOffset)))
+        device.device_network_id, tostring(p.deviceTempOffset)))
   end
 
   -- Humidity compensation / 습도 보정
   if product.hum_offset
-    and type(p.humOffset) == "number"
-    and old.humOffset ~= nil
-    and old.humOffset ~= p.humOffset then
-    dps[product.hum_offset] = p.humOffset
+    and type(p.deviceHumOffset) == "number"
+    and old.deviceHumOffset ~= p.deviceHumOffset then
+    dps[product.hum_offset] = p.deviceHumOffset
     log.info(string.format("%s: humidity offset=%s",
-        device.device_network_id, tostring(p.humOffset)))
+        device.device_network_id, tostring(p.deviceHumOffset)))
   end
+
   if next(dps) then
     run_dps_control(device, dps, 1)
   end

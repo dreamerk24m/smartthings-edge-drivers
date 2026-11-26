@@ -15,11 +15,15 @@ local PREFIX = "\x00\x00\x55\xAA"
 local SUFFIX = "\x00\x00\xAA\x55"
 local HEADER_LEN = 16
 local CMD_CONTROL = 0x07
+local CMD_STATUS = 0x08
+local CMD_HEARTBEAT = 0x09
 local PROTOCOL_33_HEADER = "3.3" .. string.rep("\0", 12)
 
 tuya.CMD_DP_QUERY = CMD_DP_QUERY
 tuya.HEADER_LEN = HEADER_LEN
 tuya.CMD_CONTROL = CMD_CONTROL
+tuya.CMD_STATUS = CMD_STATUS
+tuya.CMD_HEARTBEAT = CMD_HEARTBEAT
 
 -- CRC32 (same polynomial as zlib).
 local crc_table = {}
@@ -47,6 +51,23 @@ function tuya.build_status_query(dev_id, local_key, seq, t)
   local json = string.format('{"gwId":"%s","devId":"%s","uid":"%s","t":"%s"}', dev_id, dev_id, dev_id, t)
   local payload = aes.encrypt_ecb(aes.pad(json), local_key)
   local head = PREFIX .. string.pack(">I4I4I4", seq, CMD_DP_QUERY, #payload + 8) .. payload
+  return head .. string.pack(">I4", crc32(head)) .. SUFFIX
+end
+
+-- Build a HEARTBEAT packet.
+-- 연결 유지를 위한 하트비트 패킷을 만듦.
+function tuya.build_heartbeat(dev_id, local_key, seq)
+  local data = json.encode({
+    gwId = dev_id,
+    devId = dev_id
+  })
+
+  local payload = aes.encrypt_ecb(aes.pad(data), local_key)
+
+  local head = PREFIX ..
+    string.pack(">I4I4I4", seq, CMD_HEARTBEAT, #payload + 8) ..
+    payload
+
   return head .. string.pack(">I4", crc32(head)) .. SUFFIX
 end
 

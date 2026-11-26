@@ -5,22 +5,29 @@ local emit = require("events").emit
 
 local function apply_thermo_hygro(device, product, dps, apply_extra)
   local temp, hum = dps[product.temperature], dps[product.humidity]
+  local values = {}
+
   if type(temp) == "number" then
     emit(device, capabilities.temperatureMeasurement.temperature({
-          value = temp / 10,
-          unit = "C"
+      value = temp / 10,
+      unit = "C"
     }))
+    values[#values + 1] = "temperature=" .. tostring(temp / 10)
   end
+
   if type(hum) == "number" then
     emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
+    values[#values + 1] = "humidity=" .. tostring(hum)
   end
+
   if apply_extra then
     apply_extra(device, product, dps)
   end
-  log.info(string.format("%s: temperature=%s humidity=%s",
-      device.device_network_id,
-      tostring(type(temp) == "number" and temp / 10 or nil),
-      tostring(hum)))
+
+  if #values > 0 then
+    log.info(device.device_network_id .. ": " ..
+      table.concat(values, " "))
+  end
 end
 
 return { apply = apply_thermo_hygro }
