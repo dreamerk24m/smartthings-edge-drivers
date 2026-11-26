@@ -45,16 +45,102 @@ end
 -- Persistent connection / 지속 연결
 ---------------------------------------------------------------------------
 
+local RECONNECT_INTERVAL = 10
+local INITIAL_QUERY_TIMEOUT = 5
+
 local function uses_push(product)
   return product and product.kind == "thermo_hygro_led"
 end
 
+local start_push
+
+local function cancel_reconnect(device)
+  local timer = device:get_field("reconnect_timer")
+
+  if timer then
+    device:set_field("reconnect_timer", nil)
+    device.thread:cancel_timer(timer)
+  end
+end
+
+local function cancel_initial_query(session)
+  if session.initial_query_timer then
+    session.thread:cancel_timer(session.initial_query_timer)
+    session.initial_query_timer = nil
+  end
+end
+
 local function stop_push(device)
+  cancel_reconnect(device)
+
   local session = device:get_field("tuya_session")
 
   if session then
     device:set_field("tuya_session", nil)
+    cancel_initial_query(session)
     transport.close_session(session)
+  end
+end
+
+-- Schedule a single reconnection attempt.
+-- 재연결 시도를 한 번만 예약함.
+local function schedule_reconnect(device)
+  local p = device.preferences or {}
+  local product = PRODUCTS[p.productId]
+
+  if not is_configured(p) or not uses_push(product) then
+    return
+  end
+
+  if device:get_field("tuya_session")
+    or device:get_field("reconnect_timer") then
+    return
+  end
+
+  local timer
+
+  timer = device.thread:call_with_delay(
+    RECONNECT_INTERVAL,
+
+    function()
+      if device:get_field("reconnect_timer") ~= timer then
+        return
+      end
+
+      device:set_field("reconnect_timer", nil)
+
+      local prefs = device.preferences or {}
+      local current_product = PRODUCTS[prefs.productId]
+
+      if not is_configured(prefs)
+        or not uses_push(current_product) then
+        return
+      end
+
+      if device:get_field("tuya_session") then
+        return
+      end
+
+      log.info(device.device_network_id ..
+        ": reconnecting")
+
+      start_push(device, current_product)
+    end,
+
+    "tuya-reconnect"
+  )
+
+  if timer then
+    device:set_field("reconnect_timer", timer)
+
+    log.info(string.format(
+      "%s: reconnect scheduled in %d seconds",
+      device.device_network_id,
+      RECONNECT_INTERVAL
+    ))
+  else
+    log.warn(device.device_network_id ..
+      ": failed to schedule reconnect")
   end
 end
 
@@ -92,6 +178,17 @@ local function handle_session_packet(device, product,
     return
   end
 
+  -- Confirm the initial status response.
+  -- 최초 상태 조회 응답을 확인함.
+  if cmd == tuya.CMD_DP_QUERY
+    and session.initial_query_timer then
+
+    cancel_initial_query(session)
+
+    log.info(device.device_network_id ..
+      ": session initialized")
+  end
+
   -- Merge received values into the session cache.
   -- 수신한 값을 세션 캐시에 반영함.
   for dp, value in pairs(decoded.dps) do
@@ -111,9 +208,14 @@ local function handle_session_packet(device, product,
   end
 end
 
-local function start_push(device, product)
-  local p = device.preferences
+start_push = function(device, product)
+  local p = device.preferences or {}
   local current = device:get_field("tuya_session")
+
+  if not is_configured(p) or not uses_push(product) then
+    stop_push(device)
+    return
+  end
 
   -- Keep the session if connection settings have not changed.
   -- 연결 설정이 바뀌지 않았다면 기존 연결을 유지함.
@@ -137,8 +239,11 @@ local function start_push(device, product)
     end,
 
     function(s, reason)
+      cancel_initial_query(s)
+
       if device:get_field("tuya_session") == s then
         device:set_field("tuya_session", nil)
+        schedule_reconnect(device)
       end
     end
   )
@@ -146,6 +251,8 @@ local function start_push(device, product)
   if not session then
     log.warn(device.device_network_id ..
       ": connection failed: " .. tostring(err))
+
+    schedule_reconnect(device)
     return
   end
 
@@ -157,12 +264,48 @@ local function start_push(device, product)
 
   local ok, query_err = transport.session_query(session)
 
-  if ok then
-    log.debug(device.device_network_id ..
-      ": initial status query TX")
-  else
+  if not ok then
     log.warn(device.device_network_id ..
       ": initial query failed: " .. tostring(query_err))
+
+    if not session.closed then
+      transport.close_session(session, "initial query failed")
+    end
+
+    return
+  end
+
+  log.debug(device.device_network_id ..
+    ": initial status query TX")
+
+  -- Disconnect if the initial status response is missing.
+  -- 최초 상태 조회 응답이 없으면 연결을 종료함.
+  session.initial_query_timer = device.thread:call_with_delay(
+    INITIAL_QUERY_TIMEOUT,
+
+    function()
+      if device:get_field("tuya_session") ~= session
+        or session.closed
+        or not session.initial_query_timer then
+        return
+      end
+
+      session.initial_query_timer = nil
+
+      transport.close_session(
+        session,
+        "initial status query timeout"
+      )
+    end,
+
+    "tuya-initial-query"
+  )
+
+  if not session.initial_query_timer then
+    transport.close_session(
+      session,
+      "failed to schedule initial query timeout"
+    )
   end
 end
 
