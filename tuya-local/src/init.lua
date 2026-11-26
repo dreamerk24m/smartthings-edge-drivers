@@ -52,6 +52,7 @@ local function uses_push(product)
   return product and (
     product.kind == "thermo_hygro_led"
     or product.kind == "power_strip"
+    or product.kind == "ir_blaster"
   )
 end
 
@@ -209,6 +210,12 @@ local function handle_session_packet(device, product,
   if handler and handler.apply then
     handler.apply(device, product, decoded.dps, session.dps)
   end
+
+  if cmd == tuya.CMD_STATUS
+    and handler
+    and handler.handle_push then
+    handler.handle_push(device, product, decoded.dps, session)
+  end
 end
 
 start_push = function(device, product)
@@ -243,6 +250,12 @@ start_push = function(device, product)
 
     function(s, reason)
       cancel_initial_query(s)
+
+      local handler = handlers[product.kind]
+
+      if handler and handler.cancel_learning then
+        handler.cancel_learning(s)
+      end
 
       if device:get_field("tuya_session") == s then
         device:set_field("tuya_session", nil)
@@ -590,7 +603,7 @@ local function handle_refresh(driver, device, command)
 
   if child and child.id == device.id then
     parent.thread:call_with_delay(0, function()
-      poll(parent)
+      handle_refresh(driver, parent, command)
     end)
   end
 end
