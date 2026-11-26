@@ -49,7 +49,10 @@ local RECONNECT_INTERVAL = 10
 local INITIAL_QUERY_TIMEOUT = 5
 
 local function uses_push(product)
-  return product and product.kind == "thermo_hygro_led"
+  return product and (
+    product.kind == "thermo_hygro_led"
+    or product.kind == "power_strip"
+  )
 end
 
 local start_push
@@ -501,9 +504,19 @@ local function handle_switch(driver, device, command)
   local handler = handlers[product.kind]
 
   if handler and handler.handle_switch then
-    handler.handle_switch(
-      device, parent, product, command, is_on, run_control
-    )
+    if device ~= parent and uses_push(product) then
+      -- Execute child commands on the parent device thread.
+      -- 자식 기기 명령을 부모 기기 스레드에서 실행함.
+      parent.thread:call_with_delay(0, function()
+        handler.handle_switch(
+          device, parent, product, command, is_on, run_control
+        )
+      end)
+    else
+      handler.handle_switch(
+        device, parent, product, command, is_on, run_control
+      )
+    end
   end
 end
 

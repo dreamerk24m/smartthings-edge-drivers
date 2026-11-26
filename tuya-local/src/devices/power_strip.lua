@@ -10,26 +10,72 @@ local OUTLET_PROFILE = "tuya-power-strip-outlet"
 -- The main switch is on when at least one outlet is on. Power is DP value / power_scale (W).
 -- 콘센트 상태는 자식 기기와 이 기기의 outlet component에 보냄. 메인 스위치는 하나라도 켜져 있으면 on.
 
-local function apply_power_strip(device, product, dps)
-  local seen, any_on = false, false
+local function apply_power_strip(device, product, dps, cache)
+  local seen = false
+  local values = {}
+  local states = cache or dps
+
+  -- Emit only received outlet states.
+  -- 수신한 콘센트 상태만 이벤트로 발생시킴.
   for i, dp in ipairs(product.outlets) do
     local value = dps[dp]
+
     if type(value) == "boolean" then
       seen = true
-      if value then any_on = true end
+
       local child = device:get_child_by_parent_assigned_key(dp)
-      if child then emit(child, switch_event(value)) end
+      if child then
+        emit(child, switch_event(value))
+      end
+
       emit_component(device, "outlet" .. i, switch_event(value))
+
+      values[#values + 1] =
+        "outlet" .. i .. "=" .. tostring(value)
     end
   end
-  if seen then emit(device, switch_event(any_on)) end
-  local power = dps[product.power]
-  if type(power) == "number" then
-    emit(device, capabilities.powerMeter.power({ value = power / product.power_scale, unit = "W" }))
+
+  -- Calculate the main switch state from all cached outlets.
+  -- 캐시에 저장된 전체 콘센트 상태로 메인 스위치 상태를 계산함.
+  if seen then
+    local any_on = false
+    local all_known = true
+
+    for _, dp in ipairs(product.outlets) do
+      local value = states[dp]
+
+      if type(value) ~= "boolean" then
+        all_known = false
+      elseif value then
+        any_on = true
+      end
+    end
+
+    if any_on or all_known then
+      emit(device, switch_event(any_on))
+      values[#values + 1] = "any_on=" .. tostring(any_on)
+    end
   end
-  log.info(string.format("%s: any_on=%s power=%s",
-      device.device_network_id, tostring(seen and any_on or nil),
-      tostring(type(power) == "number" and power / product.power_scale or nil)))
+
+  -- Report power only when its DP is received.
+  -- 전력 DP를 수신한 경우에만 소비전력을 보고함.
+  local power = dps[product.power]
+
+  if type(power) == "number" then
+    local watts = power / product.power_scale
+
+    emit(device, capabilities.powerMeter.power({
+      value = watts,
+      unit = "W"
+    }))
+
+    values[#values + 1] = "power=" .. tostring(watts)
+  end
+
+  if #values > 0 then
+    log.info(device.device_network_id .. ": " ..
+      table.concat(values, " "))
+  end
 end
 
 -- Create one child device per outlet, only once. The child key is the DP number ("1".."4").

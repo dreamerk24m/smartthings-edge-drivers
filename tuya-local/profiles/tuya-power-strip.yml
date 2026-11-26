@@ -6,6 +6,8 @@ components:
         version: 1
       - id: powerMeter
         version: 1
+      - id: refresh
+        version: 1
     categories:
       - name: SmartPlug
   - id: outlet1
@@ -100,6 +102,11 @@ deviceConfig:
       patch: []
     - component: main
       capability: powerMeter
+      version: 1
+      values: []
+      patch: []
+    - component: main
+      capability: refresh
       version: 1
       values: []
       patch: []
