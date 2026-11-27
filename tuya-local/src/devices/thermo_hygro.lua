@@ -7,16 +7,22 @@ local function apply_thermo_hygro(device, product, dps, apply_extra)
   local temp, hum = dps[product.temperature], dps[product.humidity]
   local values = {}
 
+  -- Force state changes for temperature and humidity reporting.
+  -- 온습도 보고 시 상태 변화를 강제로 지정함.
+  local metadata = { state_change = true }
+
   if type(temp) == "number" then
     emit(device, capabilities.temperatureMeasurement.temperature({
       value = temp / 10,
       unit = "C"
-    }))
+    }, metadata))
     values[#values + 1] = "temperature=" .. tostring(temp / 10)
   end
 
   if type(hum) == "number" then
-    emit(device, capabilities.relativeHumidityMeasurement.humidity(hum))
+    emit(device, capabilities.relativeHumidityMeasurement.humidity(
+      hum, metadata
+    ))
     values[#values + 1] = "humidity=" .. tostring(hum)
   end
 
