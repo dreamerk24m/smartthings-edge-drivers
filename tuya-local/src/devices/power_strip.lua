@@ -78,12 +78,10 @@ local function apply_power_strip(device, product, dps, cache)
   end
 end
 
--- Create one child device per outlet, only once. The child key is the DP number ("1".."4").
--- 콘센트마다 자식 기기를 한 번만 만듦. 자식 키는 DP 번호("1"~"4").
+-- Create missing outlet children using their DP numbers as keys ("1".."4").
+-- DP 번호("1"~"4")를 키로 사용해 빠진 콘센트 자식 기기를 만듦.
 
 local function create_children(driver, device, product)
-  if device:get_field("children_created") then return end
-  device:set_field("children_created", true, { persist = true })
   for i, dp in ipairs(product.outlets) do
     if not device:get_child_by_parent_assigned_key(dp) then
       local ok, err = driver:try_create_device({

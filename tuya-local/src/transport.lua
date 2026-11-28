@@ -99,6 +99,19 @@ local function session_heartbeat(session)
   end
 end
 
+local function read_packet_size(session)
+  local size, err = tuya.packet_size(session.buffer)
+  if not size then
+    close_session(session, "bad header: " .. tostring(err))
+    return nil
+  end
+  if size < tuya.HEADER_LEN + 12 or size > MAX_PACKET_SIZE then
+    close_session(session, "invalid packet size")
+    return nil
+  end
+  return size
+end
+
 local function session_receive(session)
   if session.closed then return end
 
@@ -108,25 +121,13 @@ local function session_receive(session)
   -- Read complete packets while preserving partial data.
   -- 부분 수신 데이터를 보존하면서 완전한 패킷을 읽음.
   for _ = 1, MAX_PACKETS do
-    local target = tuya.HEADER_LEN
-
+    local size
     if #session.buffer >= tuya.HEADER_LEN then
-      local size, err = tuya.packet_size(session.buffer)
-
-      if not size then
-        close_session(session, "bad header: " .. tostring(err))
-        return
-      end
-
-      if size < tuya.HEADER_LEN + 12
-        or size > MAX_PACKET_SIZE then
-        close_session(session, "invalid packet size")
-        return
-      end
-
-      target = size
+      size = read_packet_size(session)
+      if not size then return end
     end
 
+    local target = size or tuya.HEADER_LEN
     local needed = target - #session.buffer
 
     if needed > 0 then
@@ -143,45 +144,35 @@ local function session_receive(session)
       end
     end
 
-    if #session.buffer >= tuya.HEADER_LEN then
-      local size, err = tuya.packet_size(session.buffer)
+    if not size then
+      size = read_packet_size(session)
+      if not size then return end
+    end
 
-      if not size then
-        close_session(session, "bad header: " .. tostring(err))
-        return
-      end
+    if #session.buffer >= size then
+      local packet = session.buffer:sub(1, size)
+      session.buffer = session.buffer:sub(size + 1)
 
-      if size < tuya.HEADER_LEN + 12
-        or size > MAX_PACKET_SIZE then
-        close_session(session, "invalid packet size")
-        return
-      end
+      local cmd, retcode, plain =
+      tuya.parse(packet, session.key)
 
-      if #session.buffer >= size then
-        local packet = session.buffer:sub(1, size)
-        session.buffer = session.buffer:sub(size + 1)
+      if not cmd then
+        log.warn(session.dni ..
+            ": packet parse failed: " .. tostring(retcode))
 
-        local cmd, retcode, plain =
-        tuya.parse(packet, session.key)
-
-        if not cmd then
-          log.warn(session.dni ..
-              ": packet parse failed: " .. tostring(retcode))
-
-        elseif cmd == tuya.CMD_HEARTBEAT then
-          if retcode == 0 then
-            session.heartbeat_pending = false
-            log.debug(session.dni .. ": heartbeat ACK")
-          else
-            close_session(session, "heartbeat rejected")
-            return
-          end
-
-        elseif session.on_packet then
-          session.on_packet(session, cmd, retcode, plain)
-
-          if session.closed then return end
+      elseif cmd == tuya.CMD_HEARTBEAT then
+        if retcode == 0 then
+          session.heartbeat_pending = false
+          log.debug(session.dni .. ": heartbeat ACK")
+        else
+          close_session(session, "heartbeat rejected")
+          return
         end
+
+      elseif session.on_packet then
+        session.on_packet(session, cmd, retcode, plain)
+
+        if session.closed then return end
       end
     end
   end
