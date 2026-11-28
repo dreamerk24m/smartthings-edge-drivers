@@ -288,6 +288,10 @@ local function close_conn(device, reason)
     device:set_field("sock", nil)
   end
   device:set_field("requests", {})
+  for _, key in ipairs({ "power", "main_power", "bg_power", "active_mode",
+    "expect_main", "expect_background", "expect_moonlight", "settling", "on_main_on" }) do
+    device:set_field(key, nil)
+  end
 end
 
 -- Defined below (get_conn and schedule_reconnect call each other)
@@ -381,8 +385,13 @@ end
 
 -- Send a command without waiting for the answer (on_result is called when it arrives)
 -- 명령 보내기 (답을 기다리지 않음. 답이 오면 on_result가 불림)
-local function send_command(device, method, params, on_result)
+local function send_command(device, method, params, on_result, confirmed_socket)
   for attempt = 1, 2 do
+    -- A color write is authorized only on the connection that reported power.
+    if confirmed_socket and device:get_field("sock") ~= confirmed_socket then
+      schedule_reconnect(device, 1)
+      return false
+    end
     local sock = get_conn(device)
     if not sock then return false end
 
@@ -467,7 +476,16 @@ end
 -- State changes only here; command handlers never emit state directly.
 -- 기기가 알려 준 값(props 알림, get_prop 결과)을 화면에 반영
 -- 화면 상태는 이 함수로만 바뀜 (명령을 보낸 쪽에서는 직접 바꾸지 않음)
-local function apply_props(device, props)
+local flush_after_on
+
+local function reserved_kind(device, comp_id)
+  local pending = device:get_field("pending_" .. comp_id)
+  return pending and pending.deferred and pending.kind
+end
+
+local function apply_props(device, props, confirm_command)
+  local main_reserved = reserved_kind(device, "main")
+  local bg_reserved = reserved_kind(device, "background")
   for key, value in pairs(props) do
     if value ~= nil and value ~= "" then
       local num = tonumber(value)
@@ -487,17 +505,18 @@ local function apply_props(device, props)
       elseif key == "bright" and num then
         device:set_field("bright", num)
         emit(device, "main", capabilities.switchLevel.level(num))
-      elseif key == "ct" and num then
+      elseif key == "ct" and num and main_reserved ~= "ct" then
         emit(device, "main", capabilities.colorTemperature.colorTemperature(num))
       elseif key == "bg_power" then
+        device:set_field("bg_power", value)
         emit(device, "background", switch_event(value))
       elseif key == "bg_bright" and num then
         emit(device, "background", capabilities.switchLevel.level(num))
-      elseif key == "bg_ct" and num then
+      elseif key == "bg_ct" and num and bg_reserved ~= "ct" then
         emit(device, "background", capabilities.colorTemperature.colorTemperature(num))
-      elseif key == "bg_hue" and num then
+      elseif key == "bg_hue" and num and bg_reserved ~= "hsv" then
         emit(device, "background", capabilities.colorControl.hue(to_st_hue(num)))
-      elseif key == "bg_sat" and num then
+      elseif key == "bg_sat" and num and bg_reserved ~= "hsv" then
         emit(device, "background", capabilities.colorControl.saturation(num))
       elseif key == "bg_lmode" and num then
         -- Back light mode (1 = RGB, 2 = color temperature, 3 = HSV)
@@ -523,7 +542,7 @@ local function apply_props(device, props)
       -- Tell whoever is waiting for the main light to turn on (set by the commands section)
       -- 본등이 켜지기를 기다리는 쪽에 알림 (명령 구역에서 등록)
       local on_main_on = device:get_field("on_main_on")
-      if main_on and on_main_on then
+      if confirm_command and main_on and on_main_on then
         device:set_field("on_main_on", nil)
         on_main_on()
       end
@@ -533,6 +552,10 @@ local function apply_props(device, props)
     -- 천장등: 본등 스위치는 전원(달빛 중에도 켜짐), 달빛 스위치는 모드
     local moon_on = main_on and device:get_field("active_mode") == 1
     emit(device, "moonlight", switch_event(moon_on and "on" or "off"))
+  end
+  if confirm_command then
+    if props.power or props.main_power or props.active_mode then flush_after_on(device, "main") end
+    if props.bg_power then flush_after_on(device, "background") end
   end
   if props.power or props.main_power or props.active_mode or props.bright or props.nl_br then
     update_status(device)
@@ -547,7 +570,7 @@ local function verify_power(device)
     device:set_field("verify_timer", nil)
     send_command(device, "get_prop", { "power", "main_power", "bg_power" }, function(result)
       if type(result) == "table" then
-        apply_props(device, { power = result[1], main_power = result[2], bg_power = result[3] })
+        apply_props(device, { power = result[1], main_power = result[2], bg_power = result[3] }, true)
       end
     end)
   end)
@@ -566,12 +589,14 @@ local function handle_props(device, params)
     -- (e.g. "off" while turning on), and a command arriving in that moment would be handled as if off
     -- 같은 알림의 power도 버림: 이것만으로 계산하면 잠깐 틀린 켜짐/꺼짐이 올라가고
     -- (예: 켜는 중에 "꺼짐"), 그 사이에 온 명령이 꺼진 상태로 처리됨
+    device:set_field("main_power", nil)
+    device:set_field("bg_power", nil)
     params.main_power = nil
     params.bg_power = nil
     params.power = nil
     verify_power(device)
   end
-  apply_props(device, params)
+  apply_props(device, params, true)
 end
 
 -- Read all values from the device and apply them
@@ -610,8 +635,8 @@ end
 -- 바로 뒤에 오는 명령(예: 루틴의 켜기와 같이 오는 하루 조명)이 새 상태를 보게 됨
 local EXPECT_SECONDS = 3
 
-local function expect(device, comp_id, on)
-  device:set_field("expect_" .. comp_id, { on = on, at = os.time() })
+local function expect(device, comp_id, on, sent_color)
+  device:set_field("expect_" .. comp_id, { on = on, at = os.time(), sent_color = sent_color })
 end
 
 local function is_on(device, comp_id)
@@ -669,16 +694,43 @@ local function scene_params(device, comp_id, level)
   return { "ct", current_ct(device, comp_id), level }
 end
 
--- After the mode is known: send the held color temperature if the normal light is on.
--- In moonlight or when off, it stays saved and is applied later.
--- 모드를 알고 난 뒤: 일반 조명이 켜져 있으면 보류한 색온도를 보냄
--- 달빛이거나 꺼져 있으면 저장된 채로 두었다가 나중에 적용
-local function flush_pending_ct(device)
-  local pending = device:get_field("pending_main")
-  if pending and pending.kind == "ct" and is_on(device, "main") and not in_moonlight(device) then
-    device:set_field("pending_main", nil)
-    send_command(device, "set_ct_abx", { pending.ct, "smooth", 300 })
+-- Color automation requires a power report from this connection; a recent on command alone is insufficient.
+-- 색상 자동화는 현재 연결에서 기기가 켜짐을 보고한 뒤에만 전송한다.
+local function confirmed_for_color(device, comp_id)
+  if not device:get_field("sock") or not is_on(device, comp_id) then return false end
+  if comp_id == "background" then return device:get_field("bg_power") == "on" end
+  return device:get_field("power") == "on" and device:get_field("main_power") == "on"
+    and (not has_moonlight(device) or (device:get_field("active_mode") == 0
+      and not in_moonlight(device) and not device:get_field("settling")))
+end
+
+local function clear_on_result(device, comp_id, pending)
+  if not pending then return nil end
+  return function()
+    if device:get_field("pending_" .. comp_id) == pending then
+      device:set_field("pending_" .. comp_id, nil)
+    end
   end
+end
+
+local function send_pending(device, comp_id, pending)
+  local intent = device:get_field("expect_" .. comp_id)
+  if intent then intent.sent_color = pending end
+  local method, params
+  if pending.kind == "ct" then
+    method, params = METHODS[comp_id].ct, { pending.ct, "smooth", 300 }
+  else
+    method, params = "bg_set_hsv", { pending.hue, pending.sat, "smooth", 300 }
+  end
+  send_command(device, method, params, clear_on_result(device, comp_id, pending), device:get_field("sock"))
+end
+
+flush_after_on = function(device, comp_id)
+  local e = device:get_field("expect_" .. comp_id)
+  if not e or not e.on or os.time() - e.at > EXPECT_SECONDS then return end
+  if not confirmed_for_color(device, comp_id) then return end
+  local pending = device:get_field("pending_" .. comp_id)
+  if pending and pending.deferred and pending ~= e.sent_color then send_pending(device, comp_id, pending) end
 end
 
 -- Turn on/off with set_power (saved values are not used here; see power below).
@@ -696,10 +748,18 @@ local function send_power(device, comp_id, on, normal)
     -- (예: Yeelight 앱의 천장등 야간등 시간 설정이면 달빛으로 켜짐)
     params[4] = MODE_NORMAL
   end
-  send_command(device, METHODS[comp_id].power, params)
+  device:set_field(comp_id == "main" and "main_power" or "bg_power", nil)
+  if comp_id == "main" then
+    if device:get_field("bg_proact") == 1 then device:set_field("bg_power", nil) end
+    if on and has_moonlight(device) then device:set_field("active_mode", nil) end
+  end
+  if not send_command(device, METHODS[comp_id].power, params) then return end
 
   expect(device, comp_id, on)
+  if on and (comp_id == "background" or not has_moonlight(device)) then verify_power(device) end
   if comp_id == "main" then
+    device:set_field("settling", nil)
+    device:set_field("on_main_on", nil)
     -- The device link also turns the back light on/off with set_power
     -- 기기 연동이면 set_power로 뒤 조명도 같이 켜지고 꺼짐
     if state_target(device, "background") and device:get_field("bg_proact") == 1 then
@@ -712,13 +772,26 @@ local function send_power(device, comp_id, on, normal)
         -- Turned on without a mode: the light may start in moonlight (night light schedule).
         -- Hold color temperature for a moment until the mode is known.
         -- 모드 없이 켬: 달빛으로 켜질 수 있음(야간등 시간). 모드를 알 때까지 색온도를 잠깐 보류
+        local intent = device:get_field("expect_main")
         local done = false
         local function settle()
-          if done then return end
+          if done or device:get_field("expect_main") ~= intent then return end
           done = true
           device:set_field("on_main_on", nil)
           device:set_field("settling", nil)
-          flush_pending_ct(device)
+          if device:get_field("pending_main") and not confirmed_for_color(device, "main") then
+            -- The light may already be on and omit an unchanged power or mode notification.
+            local sock = device:get_field("sock")
+            if sock then
+              send_command(device, "get_prop", { "power", "main_power", "active_mode" }, function(values)
+                if device:get_field("expect_main") == intent and type(values) == "table" then
+                  apply_props(device, { power = values[1], main_power = values[2], active_mode = values[3] }, true)
+                end
+              end, sock)
+            end
+          else
+            flush_after_on(device, "main")
+          end
         end
         device:set_field("settling", true)
         -- The device sends the mode notification before the "on" notification,
@@ -738,30 +811,37 @@ end
 -- set_scene으로 켜기 (저장해 둔 값은 여기서 사용하고 지움)
 local function turn_on_with_scene(device, comp_id, level)
   local params = scene_params(device, comp_id, level)
-  device:set_field("pending_" .. comp_id, nil)
-  expect(device, comp_id, true)
+  local pending = device:get_field("pending_" .. comp_id)
+  local applied = clear_on_result(device, comp_id, pending)
+  device:set_field(comp_id == "main" and "main_power" or "bg_power", nil)
   if comp_id == "main" then
     -- set_scene turns on the normal light
     -- set_scene은 일반 조명으로 켬
-    expect(device, "moonlight", false)
+    device:set_field("settling", nil)
+    device:set_field("on_main_on", nil)
   end
   if comp_id == "background" and model_info(device).no_bg_set_scene then
     -- No bg_set_scene: turn on in the right mode (1 = color temperature, 3 = HSV), then set the values.
     -- The values are sent "sudden" so they apply while the light is still fading in.
     -- bg_set_scene이 없음: 맞는 모드(1 = 색온도, 3 = HSV)로 켜고 바로 값을 보냄
     -- 켜지면서 서서히 밝아지는 동안 적용되도록 값은 "sudden"으로 보냄
-    if params[1] == "hsv" then
-      send_command(device, "bg_set_power", { "on", "smooth", 500, 3 })
-      send_command(device, "bg_set_hsv", { params[2], params[3], "sudden", 0 })
-      send_command(device, "bg_set_bright", { params[4], "sudden", 0 })
+    local mode = params[1] == "hsv" and 3 or 1
+    if not send_command(device, "bg_set_power", { "on", "smooth", 500, mode }) then return end
+    local sock = device:get_field("sock")
+    local method, color_params
+    if mode == 3 then
+      method, color_params = "bg_set_hsv", { params[2], params[3], "sudden", 0 }
     else
-      send_command(device, "bg_set_power", { "on", "smooth", 500, 1 })
-      send_command(device, "bg_set_ct_abx", { params[2], "sudden", 0 })
-      send_command(device, "bg_set_bright", { params[3], "sudden", 0 })
+      method, color_params = "bg_set_ct_abx", { params[2], "sudden", 0 }
     end
+    if not send_command(device, method, color_params, applied, sock) then return end
+    if not send_command(device, "bg_set_bright", { params[#params], "sudden", 0 }, nil, sock) then return end
   else
-    send_command(device, METHODS[comp_id].scene, params)
+    if not send_command(device, METHODS[comp_id].scene, params, applied) then return end
   end
+  expect(device, comp_id, true, pending)
+  verify_power(device)
+  if comp_id == "main" then expect(device, "moonlight", false) end
   -- The device's front/back link applies to set_power only, not set_scene,
   -- so when linked, turn the back light on ourselves (with its saved value if there is one)
   -- 기기의 앞뒤 연동은 set_power에만 적용되고 set_scene에는 적용되지 않음
@@ -794,7 +874,10 @@ end
 -- Moonlight on: switch to moonlight (turns on if off)
 -- 달빛 켜기: 달빛으로 바꿈 (꺼져 있으면 달빛으로 켜짐)
 local function moonlight_on(device, level)
-  send_command(device, "set_power", { "on", "smooth", 500, MODE_MOON })
+  device:set_field("main_power", nil)
+  device:set_field("settling", nil)
+  device:set_field("on_main_on", nil)
+  if not send_command(device, "set_power", { "on", "smooth", 500, MODE_MOON }) then return end
   expect(device, "main", true)
   expect(device, "moonlight", true)
   if level then
@@ -863,30 +946,28 @@ local function handle_set_ct(_, device, command)
   device, comp_id = resolve(device, command)
   local lo, hi = ct_range(device, comp_id)
   local ct = clamp(math.floor(command.args.temperature), lo, hi)
-  if not normal_light_on(device, comp_id) then
-    -- Off, in moonlight, or just turned on with the mode not known yet (e.g. Circadian Lighting): save the value without turning on (like Matter ExecuteIfOff; applied with set_scene on turn-on).
-    -- Nothing is sent, so no notification comes back; update the UI directly.
-    -- 꺼져 있으면 켜지 않고 값만 저장 (Matter 표준 ExecuteIfOff와 같은 동작. 켤 때 set_scene으로 적용)
-    -- 기기로 보내는 게 없어서 알림이 오지 않으므로 화면은 직접 바꿈
-    device:set_field("pending_" .. comp_id, { kind = "ct", ct = ct })
+  local pending = { kind = "ct", ct = ct }
+  device:set_field("pending_" .. comp_id, pending)
+  if not confirmed_for_color(device, comp_id) then
+    pending.deferred = true
     emit(device, comp_id, capabilities.colorTemperature.colorTemperature(ct))
     return
   end
-  send_command(device, METHODS[comp_id].ct, { ct, "smooth", 300 })
+  send_pending(device, comp_id, pending)
 end
 
 local function set_bg_color(device, hue_pct, sat)
   local hue = to_yeelight_hue(hue_pct)
   sat = clamp(math.floor(sat), 0, 100)
-  if not is_on(device, "background") then
-    -- Off: save the value without turning on (applied with bg_set_scene on turn-on)
-    -- 꺼져 있으면 켜지 않고 값만 저장 (켤 때 bg_set_scene으로 적용)
-    device:set_field("pending_background", { kind = "hsv", hue = hue, sat = sat })
+  local pending = { kind = "hsv", hue = hue, sat = sat }
+  device:set_field("pending_background", pending)
+  if not confirmed_for_color(device, "background") then
+    pending.deferred = true
     emit(device, "background", capabilities.colorControl.hue(to_st_hue(hue)))
     emit(device, "background", capabilities.colorControl.saturation(sat))
     return
   end
-  send_command(device, "bg_set_hsv", { hue, sat, "smooth", 300 })
+  send_pending(device, "background", pending)
 end
 
 local function current_bg(device, attr)
