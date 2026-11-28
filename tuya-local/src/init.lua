@@ -471,7 +471,20 @@ local function handle_ir_learn(driver, device, command)
     handler.learn(device, product)
   elseif command.component == "irSendTest" then
     handler.send(device, product, run_dps_control)
+  elseif command.component == "addRemote" then
+    handler.create_remote(driver, device)
   end
+end
+
+local function handle_keypad(driver, device, command)
+  if device.network_type ~= st_device.NETWORK_TYPE_CHILD
+    or not device:supports_capability(
+      capabilities.keypadInput
+    ) then
+    return
+  end
+
+  handlers.ir_blaster.handle_keypad(device, command)
 end
 
 local function handle_refresh(driver, device, command)
@@ -538,7 +551,20 @@ local function discovery_handler(driver, _, _)
 end
 
 local function device_init(driver, device)
-  log.info(device.device_network_id .. ": init")
+  log.info(
+    tostring(device.device_network_id or device.id)
+      .. ": init"
+  )
+
+  if device.network_type == st_device.NETWORK_TYPE_CHILD
+    and device:supports_capability(
+      capabilities.keypadInput
+    ) then
+
+    handlers.ir_blaster.init_remote(device)
+    return
+  end
+
   configure_device(driver, device)
 end
 
@@ -602,6 +628,10 @@ local driver = Driver("tuya-local", {
       },
       [capabilities.momentary.ID] = {
         [capabilities.momentary.commands.push.NAME] = handle_ir_learn,
+      },
+      [capabilities.keypadInput.ID] = {
+        [capabilities.keypadInput.commands.sendKey.NAME] =
+          handle_keypad,
       },
     },
 })

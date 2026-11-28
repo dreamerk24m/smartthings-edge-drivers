@@ -3,11 +3,13 @@ local log = require "log"
 local transport = require "transport"
 local thermo_hygro = require "devices.thermo_hygro"
 local json = require "st.json"
+local capabilities = require "st.capabilities"
 
 local M = {}
 
 local THERMO_CHILD_KEY = "thermo-hygro"
 local THERMO_CHILD_PROFILE = "tuya-ir-thermo-hygro"
+local REMOTE_CHILD_PROFILE = "tuya-ir-remote"
 
 -- Create the temperature and humidity child device.
 -- 온습도계 자식 기기 생성.
@@ -194,6 +196,113 @@ function M.send(device, product, run_dps_control)
   log.info("IR: sending learned code")
 
   run_dps_control(device, dps)
+end
+
+-- Create a remote child device.
+-- 리모컨 자식 기기 생성.
+function M.create_remote(driver, device)
+  local index = device:get_field("ir_remote_index") or 0
+  local child_key
+
+  repeat
+    index = index + 1
+    child_key = "remote-" .. tostring(index)
+  until not device:get_child_by_parent_assigned_key(child_key)
+
+  device:set_field("ir_remote_index", index, {
+    persist = true
+  })
+
+  local ok, err = driver:try_create_device({
+    type = "EDGE_CHILD",
+    label = "IR Remote " .. tostring(index),
+    profile = REMOTE_CHILD_PROFILE,
+    manufacturer = "Tuya",
+    parent_device_id = device.id,
+    parent_assigned_child_key = child_key,
+  })
+
+  log.info(string.format(
+    "%s: create remote %s -> %s %s",
+    device.device_network_id,
+    child_key,
+    tostring(ok),
+    tostring(err)
+  ))
+end
+
+-- Initialize supported keypad keys.
+-- 지원하는 키패드 버튼 초기화.
+-- Initialize remote capabilities.
+-- 리모컨 Capability 초기화.
+function M.init_remote(device)
+  -- Power / 전원
+  device:emit_event(
+    capabilities.switch.switch.on()
+  )
+
+  -- Volume / 볼륨
+  device:emit_event(
+    capabilities.audioVolume.volume(20)
+  )
+
+  -- Mute / 음소거
+  device:emit_event(
+    capabilities.audioMute.mute.unmuted()
+  )
+
+  -- Channel / 채널
+  device:emit_event(
+    capabilities.tvChannel.tvChannel("1")
+  )
+
+  -- Keypad / 키패드
+  device:emit_event(
+    capabilities.keypadInput.supportedKeyCodes({
+      "UP", "DOWN", "LEFT", "RIGHT", "SELECT",
+      "BACK", "EXIT", "MENU", "SETTINGS", "HOME"
+    })
+  )
+
+  -- Playback / 재생 제어
+  device:emit_event(
+    capabilities.mediaPlayback.supportedPlaybackCommands({
+      "play", "pause", "stop", "fastForward", "rewind"
+    })
+  )
+
+  device:emit_event(
+    capabilities.mediaPlayback.playbackStatus.paused()
+  )
+
+  -- Track control / 트랙 제어
+  device:emit_event(
+    capabilities.mediaTrackControl.supportedTrackControlCommands({
+      "previousTrack", "nextTrack"
+    })
+  )
+
+  -- Input source / 외부 입력
+  device:emit_event(
+    capabilities.mediaInputSource.supportedInputSources({
+      "HDMI1", "HDMI2", "HDMI3", "HDMI4",
+      "digitalTv", "USB", "bluetooth", "optical"
+    })
+  )
+
+  device:emit_event(
+    capabilities.mediaInputSource.inputSource("HDMI1")
+  )
+end
+
+-- Log keypad commands for UI testing.
+-- UI 테스트를 위해 키패드 명령을 로그에 기록.
+function M.handle_keypad(device, command)
+  log.info(string.format(
+    "IR: %s keypad key = %s",
+    device.label,
+    tostring(command.args.keyCode)
+  ))
 end
 
 return M

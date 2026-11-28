@@ -13,6 +13,11 @@ components:
     capabilities:
       - id: momentary
         version: 1
+  - id: addRemote
+    label: Add Remote
+    capabilities:
+      - id: momentary
+        version: 1
 preferences:
   - name: deviceIp
     title: "Device IP"
