@@ -36,6 +36,17 @@ deviceConfig:
       - component: main
         capability: temperatureMeasurement
         version: 1
+        group: main
+        values:
+          - label: "{{temperature.value}}{{temperature.unit}}"
+        composite: true
+      - component: main
+        capability: relativeHumidityMeasurement
+        version: 1
+        group: main
+        values:
+          - label: "  {{humidity.value}}{{humidity.unit}}"
+        composite: true
     actions: []
   detailView:
     - component: main
