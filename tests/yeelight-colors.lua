@@ -185,4 +185,15 @@ test("ceiling mode verification keeps CT reserved in moonlight", function()
   assert_read_only_since(count)
 end)
 
+test("a ceiling off command supersedes the previous on timeout", function()
+  local device = light("ceilb")
+  temperature(device, "main", 3400)
+  command(device, "main", "switch", "on")
+  local previous_timeout = assert(device.timers[1.5])
+  command(device, "main", "switch", "off")
+  local count = #sent
+  previous_timeout()
+  assert(#sent == count, "stale on timeout sent a command after off")
+end)
+
 assert(failed == 0, failed .. " regression test(s) failed")

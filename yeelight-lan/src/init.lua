@@ -733,6 +733,42 @@ flush_after_on = function(device, comp_id)
   if pending and pending.deferred and pending ~= e.sent_color then send_pending(device, comp_id, pending) end
 end
 
+local function wait_for_ceiling_mode(device)
+  -- Turned on without a mode: the light may start in moonlight (night light schedule).
+  -- Hold color temperature for a moment until the mode is known.
+  -- 모드 없이 켬: 달빛으로 켜질 수 있음(야간등 시간). 모드를 알 때까지 색온도를 잠깐 보류
+  local intent = device:get_field("expect_main")
+  local done = false
+  local function settle()
+    if done or device:get_field("expect_main") ~= intent then return end
+    done = true
+    device:set_field("on_main_on", nil)
+    device:set_field("settling", nil)
+    if device:get_field("pending_main") and not confirmed_for_color(device, "main") then
+      -- The light may already be on and omit an unchanged power or mode notification.
+      local sock = device:get_field("sock")
+      if sock then
+        send_command(device, "get_prop", { "power", "main_power", "active_mode" }, function(values)
+          if device:get_field("expect_main") == intent and type(values) == "table" then
+            apply_props(device, { power = values[1], main_power = values[2], active_mode = values[3] }, true)
+          end
+        end, sock)
+      end
+    else
+      flush_after_on(device, "main")
+    end
+  end
+  device:set_field("settling", true)
+  -- The device sends the mode notification before the "on" notification,
+  -- so the mode is known once "on" arrives (about 0.2s). Wait 0.2s more in case the order differs.
+  -- 기기는 모드 알림을 켜짐 알림보다 먼저 보냄. 그래서 켜짐 알림이 오면(약 0.2초) 모드를 알고 있음
+  -- 순서가 바뀌어 올 때를 대비해 0.2초 더 기다림
+  device:set_field("on_main_on", function() device.thread:call_with_delay(0.2, settle) end)
+  -- If no notification comes, stop holding after 1.5s anyway
+  -- 알림이 오지 않으면 1.5초 뒤에 보류를 끝냄
+  device.thread:call_with_delay(1.5, settle)
+end
+
 -- Turn on/off with set_power (saved values are not used here; see power below).
 -- On/off state is updated by the device's props notifications.
 -- normal = true forces the normal light (used to leave moonlight)
@@ -769,39 +805,7 @@ local function send_power(device, comp_id, on, normal)
       if not on or normal then
         expect(device, "moonlight", false)
       else
-        -- Turned on without a mode: the light may start in moonlight (night light schedule).
-        -- Hold color temperature for a moment until the mode is known.
-        -- 모드 없이 켬: 달빛으로 켜질 수 있음(야간등 시간). 모드를 알 때까지 색온도를 잠깐 보류
-        local intent = device:get_field("expect_main")
-        local done = false
-        local function settle()
-          if done or device:get_field("expect_main") ~= intent then return end
-          done = true
-          device:set_field("on_main_on", nil)
-          device:set_field("settling", nil)
-          if device:get_field("pending_main") and not confirmed_for_color(device, "main") then
-            -- The light may already be on and omit an unchanged power or mode notification.
-            local sock = device:get_field("sock")
-            if sock then
-              send_command(device, "get_prop", { "power", "main_power", "active_mode" }, function(values)
-                if device:get_field("expect_main") == intent and type(values) == "table" then
-                  apply_props(device, { power = values[1], main_power = values[2], active_mode = values[3] }, true)
-                end
-              end, sock)
-            end
-          else
-            flush_after_on(device, "main")
-          end
-        end
-        device:set_field("settling", true)
-        -- The device sends the mode notification before the "on" notification,
-        -- so the mode is known once "on" arrives (about 0.2s). Wait 0.2s more in case the order differs.
-        -- 기기는 모드 알림을 켜짐 알림보다 먼저 보냄. 그래서 켜짐 알림이 오면(약 0.2초) 모드를 알고 있음
-        -- 순서가 바뀌어 올 때를 대비해 0.2초 더 기다림
-        device:set_field("on_main_on", function() device.thread:call_with_delay(0.2, settle) end)
-        -- If no notification comes, stop holding after 1.5s anyway
-        -- 알림이 오지 않으면 1.5초 뒤에 보류를 끝냄
-        device.thread:call_with_delay(1.5, settle)
+        wait_for_ceiling_mode(device)
       end
     end
   end
@@ -941,33 +945,34 @@ local function handle_set_level(_, device, command)
   send_command(device, METHODS[comp_id].bright, { level, "smooth", 300 })
 end
 
+local function apply_or_defer_color(device, comp_id, pending)
+  device:set_field("pending_" .. comp_id, pending)
+  if confirmed_for_color(device, comp_id) then
+    send_pending(device, comp_id, pending)
+    return
+  end
+
+  pending.deferred = true
+  if pending.kind == "ct" then
+    emit(device, comp_id, capabilities.colorTemperature.colorTemperature(pending.ct))
+  else
+    emit(device, comp_id, capabilities.colorControl.hue(to_st_hue(pending.hue)))
+    emit(device, comp_id, capabilities.colorControl.saturation(pending.sat))
+  end
+end
+
 local function handle_set_ct(_, device, command)
   local comp_id
   device, comp_id = resolve(device, command)
   local lo, hi = ct_range(device, comp_id)
   local ct = clamp(math.floor(command.args.temperature), lo, hi)
-  local pending = { kind = "ct", ct = ct }
-  device:set_field("pending_" .. comp_id, pending)
-  if not confirmed_for_color(device, comp_id) then
-    pending.deferred = true
-    emit(device, comp_id, capabilities.colorTemperature.colorTemperature(ct))
-    return
-  end
-  send_pending(device, comp_id, pending)
+  apply_or_defer_color(device, comp_id, { kind = "ct", ct = ct })
 end
 
 local function set_bg_color(device, hue_pct, sat)
   local hue = to_yeelight_hue(hue_pct)
   sat = clamp(math.floor(sat), 0, 100)
-  local pending = { kind = "hsv", hue = hue, sat = sat }
-  device:set_field("pending_background", pending)
-  if not confirmed_for_color(device, "background") then
-    pending.deferred = true
-    emit(device, "background", capabilities.colorControl.hue(to_st_hue(hue)))
-    emit(device, "background", capabilities.colorControl.saturation(sat))
-    return
-  end
-  send_pending(device, "background", pending)
+  apply_or_defer_color(device, "background", { kind = "hsv", hue = hue, sat = sat })
 end
 
 local function current_bg(device, attr)
